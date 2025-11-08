@@ -30,7 +30,7 @@ const { SSEServerTransport } = require('@modelcontextprotocol/sdk/server/sse.js'
 const { CallToolRequestSchema, ListToolsRequestSchema } = require('@modelcontextprotocol/sdk/types.js');
 
 // Configuration from environment variables
-const PORT = process.env.PORT || 3000;
+const PORT = process.env.PORT || 3009;
 const HOST = process.env.HOST || '0.0.0.0';
 const DEBUG = process.env.DEBUG === 'true';
 

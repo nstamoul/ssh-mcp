@@ -1,0 +1,67 @@
+# MCP SSH HTTP Server - Docker Compose Configuration
+# Designed to work with MCP Gateway (Caddy reverse proxy)
+#
+# This service connects to the mcp_gateway network for routing through
+# the centralized Caddy reverse proxy at mcp.orb.local
+#
+# Usage:
+#   docker compose up -d        # Start service
+#   docker compose logs -f      # View logs
+#   docker compose down         # Stop service
+
+services:
+  ssh-mcp:
+    image: mcp-ssh:latest
+    container_name: ssh-mcp
+    build:
+      context: .
+      dockerfile: Dockerfile
+    restart: unless-stopped
+
+    # Environment configuration
+    environment:
+      - NODE_ENV=production
+      - PORT=3009
+      - HOST=0.0.0.0
+      - DEBUG=false
+      # Uncomment for debug logging:
+      # - DEBUG=true
+
+    # Volume mounts for SSH configuration
+    # IMPORTANT: Mount your SSH config and keys as read-only
+    volumes:
+      # SSH configuration (read-only)
+      - ${HOME}/.ssh/config:/home/mcp/.ssh/config:ro
+      - ${HOME}/.ssh/known_hosts:/home/mcp/.ssh/known_hosts:ro
+
+      # SSH keys (read-only)
+      # Mount your SSH keys here - adjust paths as needed
+      - ${HOME}/.ssh/id_ed25519:/home/mcp/.ssh/id_ed25519:ro
+      - ${HOME}/.ssh/id_rsa:/home/mcp/.ssh/id_rsa:ro
+
+      # If you have specific keys in different locations, add them:
+      # - ${HOME}/.ssh/id_production:/home/mcp/.ssh/id_production:ro
+      # - ${HOME}/.ssh/id_staging:/home/mcp/.ssh/id_staging:ro
+
+    # Connect to MCP Gateway network
+    networks:
+      - mcp_gateway
+
+    # Health check
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://localhost:3009/health').then(r => r.ok ? process.exit(0) : process.exit(1)).catch(() => process.exit(1))"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 10s
+
+    # Labels for OrbStack
+    labels:
+      - "dev.orbstack.service=ssh-mcp"
+      - "dev.orbstack.description=MCP SSH Agent HTTP Server"
+
+# External network created by MCP Gateway
+networks:
+  mcp_gateway:
+    external: true
+    name: mcp_gateway

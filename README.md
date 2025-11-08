@@ -87,7 +87,7 @@ node server-http.mjs
 Configuration via environment variables:
 
 ```bash
-export PORT=3000          # Port to listen on (default: 3000)
+export PORT=3009          # Port to listen on (default: 3009)
 export HOST=0.0.0.0       # Host to bind to (default: 0.0.0.0)
 export DEBUG=true         # Enable debug logging (default: false)
 npm run start:http

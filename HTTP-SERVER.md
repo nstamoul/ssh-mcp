@@ -24,7 +24,24 @@ npm install @aiondadotcom/mcp-ssh
 
 ## Running the HTTP Server
 
-### Using npm scripts
+### Recommended: Docker Deployment
+
+For production deployment, we recommend using Docker:
+
+```bash
+# Build and start
+make build && make up
+
+# View logs
+make logs
+
+# Check status
+make health
+```
+
+See [DOCKER.md](DOCKER.md) and [DEPLOYMENT.md](DEPLOYMENT.md) for complete Docker deployment instructions.
+
+### Alternative: Using npm scripts
 
 ```bash
 # Start HTTP server (production)
@@ -55,8 +72,8 @@ node server-http.mjs
 Configure the server using environment variables. You can create a `.env` file or set them in your shell:
 
 ```bash
-# Port to listen on (default: 3000)
-export PORT=3000
+# Port to listen on (default: 3009)
+export PORT=3009
 
 # Host to bind to (default: 0.0.0.0)
 export HOST=0.0.0.0
@@ -72,7 +89,7 @@ npm run start:http
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `PORT` | `3000` | TCP port to listen on |
+| `PORT` | `3009` | TCP port to listen on |
 | `HOST` | `0.0.0.0` | IP address to bind to (use `127.0.0.1` for localhost only) |
 | `DEBUG` | `false` | Enable detailed debug logging |
 
@@ -122,7 +139,7 @@ Accepts MCP protocol messages from clients. Used in conjunction with the SSE end
 const mcpClient = new MCPClient({
   transport: {
     type: 'http',
-    url: 'http://localhost:3000'
+    url: 'http://localhost:3009'
   }
 });
 
@@ -143,7 +160,7 @@ console.log(result);
 Test the health endpoint:
 
 ```bash
-curl http://localhost:3000/health
+curl http://localhost:3009/health
 ```
 
 ### Using with Claude Desktop
@@ -154,7 +171,7 @@ Configure Claude Desktop to use the HTTP server by adding to `claude_desktop_con
 {
   "mcpServers": {
     "mcp-ssh-http": {
-      "url": "http://localhost:3000/sse"
+      "url": "http://localhost:3009/sse"
     }
   }
 }
@@ -211,7 +228,7 @@ server {
     ssl_certificate_key /path/to/key.pem;
 
     location / {
-        proxy_pass http://localhost:3000;
+        proxy_pass http://localhost:3009;
         proxy_http_version 1.1;
         proxy_set_header Upgrade $http_upgrade;
         proxy_set_header Connection 'upgrade';
@@ -241,10 +258,10 @@ RUN npm ci --production
 
 COPY . .
 
-EXPOSE 3000
+EXPOSE 3009
 
 ENV HOST=0.0.0.0
-ENV PORT=3000
+ENV PORT=3009
 
 CMD ["npm", "run", "start:http"]
 ```
@@ -253,8 +270,10 @@ Build and run:
 
 ```bash
 docker build -t mcp-ssh-http .
-docker run -p 3000:3000 -v ~/.ssh:/root/.ssh:ro mcp-ssh-http
+docker run -p 3009:3009 -v ~/.ssh:/root/.ssh:ro mcp-ssh-http
 ```
+
+**For production deployment, see [DOCKER.md](DOCKER.md) and [DEPLOYMENT.md](DEPLOYMENT.md) for the complete Docker setup with docker-compose.**
 
 ### systemd Service
 
@@ -269,7 +288,7 @@ After=network.target
 Type=simple
 User=mcp
 WorkingDirectory=/opt/mcp-ssh
-Environment="PORT=3000"
+Environment="PORT=3009"
 Environment="HOST=127.0.0.1"
 ExecStart=/usr/bin/node /opt/mcp-ssh/server-http.mjs
 Restart=on-failure
@@ -289,13 +308,13 @@ sudo systemctl start mcp-ssh-http
 
 ### Server won't start
 
-- Check if the port is already in use: `lsof -i :3000`
+- Check if the port is already in use: `lsof -i :3009`
 - Verify Node.js version: `node --version` (requires Node.js 18+)
 - Check permissions for SSH config access
 
 ### Connection issues
 
-- Verify the server is running: `curl http://localhost:3000/health`
+- Verify the server is running: `curl http://localhost:3009/health`
 - Check firewall rules
 - Ensure CORS settings allow your client origin
 
