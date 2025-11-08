@@ -26,7 +26,8 @@ const execFileAsync = promisify(execFile);
 
 // Import MCP components
 const { Server } = require('@modelcontextprotocol/sdk/server/index.js');
-const { SSEServerTransport } = require('@modelcontextprotocol/sdk/server/sse.js');
+// Use the Streamable HTTP transport (supports unified POST/GET, SSE fallback, stateless/stateful)
+const { StreamableHTTPServerTransport } = require('@modelcontextprotocol/sdk/server/streamableHttp.js');
 const { CallToolRequestSchema, ListToolsRequestSchema } = require('@modelcontextprotocol/sdk/types.js');
 
 // Configuration from environment variables
@@ -594,34 +595,43 @@ async function main() {
     debugLog("Creating MCP server...");
     const mcpServer = createMCPServer(sshClient);
 
-    // Health check endpoint
+    // Health check endpoints (primary: /healthz)
+    app.get('/healthz', (req, res) => {
+      res.json({ status: 'ok', server: 'mcp-ssh-http', version: '1.1.0' });
+    });
+    // Back-compat: /health
     app.get('/health', (req, res) => {
       res.json({ status: 'ok', server: 'mcp-ssh-http', version: '1.1.0' });
     });
 
-    // SSE endpoint for MCP communication
-    app.get('/sse', async (req, res) => {
-      debugLog('SSE connection established');
-
-      const transport = new SSEServerTransport('/message', res);
-      await mcpServer.connect(transport);
-
-      debugLog('MCP server connected via SSE');
+    // Single unified endpoint implementing Streamable HTTP transport.
+    // - POST /    : JSON-RPC over HTTP with streaming responses (chunked)
+    // - GET  /    : SSE stream when client sends Accept: text/event-stream
+    // - DELETE /  : Close stream/session (when applicable)
+    const transport = new StreamableHTTPServerTransport({
+      // Stateless mode fits proxy/load-balancer friendly patterns; set to undefined.
+      // For stateful sessions with resumability, provide a generator, e.g., () => crypto.randomUUID()
+      sessionIdGenerator: undefined,
+      enableJsonResponse: true,
     });
 
-    // Message endpoint for client requests
-    app.post('/message', async (req, res) => {
-      debugLog('Received message from client');
-      // The SSEServerTransport handles this automatically
-      res.status(202).end();
+    await mcpServer.connect(transport);
+
+    app.all('/', async (req, res) => {
+      try {
+        await transport.handleRequest(req, res, req.body);
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : String(err);
+        debugLog(`Transport error handling ${req.method} ${req.url}: ${msg}`);
+        res.status(500).json({ jsonrpc: '2.0', error: { code: -32000, message: msg }, id: null });
+      }
     });
 
     // Start the server
     const server = app.listen(PORT, HOST, () => {
       console.log(`MCP SSH HTTP Server running on http://${HOST}:${PORT}`);
-      console.log(`SSE endpoint: http://${HOST}:${PORT}/sse`);
-      console.log(`Message endpoint: http://${HOST}:${PORT}/message`);
-      console.log(`Health check: http://${HOST}:${PORT}/health`);
+      console.log(`Streamable HTTP endpoint (unified): http://${HOST}:${PORT}/`);
+      console.log(`Health check: http://${HOST}:${PORT}/healthz`);
       console.log(`Debug mode: ${DEBUG}`);
     });
 

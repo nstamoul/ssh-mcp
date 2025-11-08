@@ -1,0 +1,39 @@
+services:
+  ssh-mcp-server:
+    # Use host network to access MacBook's VPN interfaces
+    # network_mode: "host"
+    # Connect to gateway network
+    networks:
+      - t2_proxy
+    ports:
+      - "3009:3009"
+    labels:
+      - "dev.orbstack.domains=ssh-mcp-server.orb.local"
+      - "dev.orbstack.service=ssh-mcp-server"
+      - "dev.orbstack.description=MCP SSH Agent HTTP Server"
+
+    # Volume mounts for SSH configuration
+    # IMPORTANT: Mount your SSH config and keys as read-only
+    volumes:
+      # SSH configuration (read-only)
+      - ${HOME}/.ssh/config:/home/mcp/.ssh/config:ro
+      - ${HOME}/.ssh/known_hosts:/home/mcp/.ssh/known_hosts:ro
+      # SSH keys (read-only)
+      # Mount your SSH keys here - adjust paths as needed
+      - ${HOME}/.ssh/id_ed25519:/home/mcp/.ssh/id_ed25519_mcp:ro
+      - ${HOME}/.ssh/id_rsa:/home/mcp/.ssh/id_rsa:ro
+      - ${HOME}/.ssh/id_rsa:/home/mcp/.ssh/id_rsa_openssh:ro
+      - ${HOME}/.ssh/id_rsa:/home/mcp/.ssh/id_rsa_windows:ro
+      # - ${HOME}/.ssh/id_ed25519:/home/mcp/.ssh/id_ed25519:ro
+      # - ${HOME}/.ssh/id_rsa:/home/mcp/.ssh/id_rsa:ro
+      # - ${HOME}/.ssh/id_ed25519:/home/mcp/.ssh/id_ed25519:ro
+      # - ${HOME}/.ssh/id_rsa:/home/mcp/.ssh/id_rsa:ro
+      # If you have specific keys in different locations, add them:
+      # - ${HOME}/.ssh/id_production:/home/mcp/.ssh/id_production:ro
+      # - ${HOME}/.ssh/id_staging:/home/mcp/.ssh/id_staging:ro
+
+# External network created by MCP Gateway
+networks:
+  mcp_gateway:
+    external: true
+    name: t2_proxy

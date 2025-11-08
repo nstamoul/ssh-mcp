@@ -1,34 +1,57 @@
 # Makefile for MCP SSH Server
-# Simplifies common Docker operations
+#
+# Supports two deployment profiles via Compose file sets:
+# - local (default on Mac): docker-compose.yml + docker-compose.local.yaml
+# - wyse:                    docker-compose.yml + docker-compose.wyse.yaml
+#
+# Use either ENV=local|wyse or convenience targets:
+# - make up                 # uses ENV=local by default
+# - make wyse-up            # forces ENV=wyse
 
-.PHONY: help build up down logs restart status test clean rebuild
+.PHONY: help build up down logs restart status test clean rebuild exec \
+        inspect network deploy update dev-build dev-logs dev-shell \
+        wyse-% local-%
+
+# Select environment (local|wyse). Default to local.
+ENV ?= local
+
+# Compose invocation and files
+COMPOSE ?= docker compose
+COMPOSE_FILES = -f docker-compose.yml -f docker-compose.$(ENV).yaml
+DC = $(COMPOSE) $(COMPOSE_FILES)
 
 help: ## Show this help message
-	@echo 'Usage: make [target]'
+	@echo 'Usage: make [target] [ENV=local|wyse]'
 	@echo ''
-	@echo 'Available targets:'
-	@awk 'BEGIN {FS = ":.*?## "} /^[a-zA-Z_-]+:.*?## / {printf "  %-15s %s\n", $$1, $$2}' $(MAKEFILE_LIST)
+	@echo 'ENV currently:' $(ENV)
+	@echo ''
+	@echo 'Common targets:'
+	@awk 'BEGIN {FS = ":.*?## "} /^[a-zA-Z_-]+:.*?## / {printf "  %-18s %s\n", $$1, $$2}' $(MAKEFILE_LIST)
+	@echo ''
+	@echo 'Convenience aliases:'
+	@echo '  wyse-<target>   -> run <target> with ENV=wyse'
+	@echo '  local-<target>  -> run <target> with ENV=local'
 
 build: ## Build the Docker image
-	docker compose build
+	$(DC) build
 
 up: ## Start the service
-	docker compose up -d
+	$(DC) up -d
 
 down: ## Stop the service
-	docker compose down
+	$(DC) down
 
 logs: ## View logs (follow mode)
-	docker compose logs -f ssh-mcp
+	$(DC) logs -f ssh-mcp-server
 
 logs-tail: ## View last 100 log lines
-	docker compose logs --tail 100 ssh-mcp
+	$(DC) logs --tail 100 ssh-mcp-server
 
 restart: ## Restart the service
-	docker compose restart ssh-mcp
+	$(DC) restart ssh-mcp-server
 
 status: ## Show service status
-	docker compose ps
+	$(DC) ps
 
 health: ## Check health endpoint
 	@curl -s http://localhost:3009/health | jq . || curl -s http://localhost:3009/health
@@ -38,16 +61,16 @@ test: ## Run integration tests
 	@curl -sf http://localhost:3009/health > /dev/null && echo "✓ Health check passed" || echo "✗ Health check failed"
 
 clean: ## Stop and remove containers, networks
-	docker compose down -v
+	$(DC) down -v
 
 rebuild: ## Rebuild and restart the service
-	docker compose up -d --build
+	$(DC) up -d --build
 
 exec: ## Execute shell in container
-	docker compose exec ssh-mcp sh
+	$(DC) exec ssh-mcp-server sh
 
 inspect: ## Show detailed container information
-	docker inspect ssh-mcp
+	docker inspect ssh-mcp-server
 
 network: ## Show network configuration
 	docker network inspect mcp_gateway
@@ -57,14 +80,21 @@ deploy: build up ## Build and deploy (build + up)
 
 update: ## Update service (pull, rebuild, restart)
 	git pull
-	docker compose up -d --build
+	$(DC) up -d --build
 	@echo "Update complete. Run 'make logs' to view output."
 
 # Development targets
 dev-build: ## Build without cache
-	docker compose build --no-cache
+	$(DC) build --no-cache
 
 dev-logs: ## View logs with timestamps
-	docker compose logs -f -t ssh-mcp
+	$(DC) logs -f -t ssh-mcp-server
 
 dev-shell: exec ## Alias for exec
+
+# Convenience wrappers: wyse-<t> or local-<t>
+wyse-%:
+	@$(MAKE) ENV=wyse $*
+
+local-%:
+	@$(MAKE) ENV=local $*
