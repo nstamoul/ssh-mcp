@@ -30,6 +30,70 @@ const { Server } = require('@modelcontextprotocol/sdk/server/index.js');
 const { StreamableHTTPServerTransport } = require('@modelcontextprotocol/sdk/server/streamableHttp.js');
 const { CallToolRequestSchema, ListToolsRequestSchema } = require('@modelcontextprotocol/sdk/types.js');
 
+// OAuth/OpenID configuration
+const OAUTH_ISSUER = process.env.OAUTH_ISSUER || 'https://authelia.nstam.eu';
+const OAUTH_AUTHORIZATION_ENDPOINT = process.env.OAUTH_AUTHORIZATION_ENDPOINT || `${OAUTH_ISSUER}/api/oidc/authorization`;
+const OAUTH_TOKEN_ENDPOINT = process.env.OAUTH_TOKEN_ENDPOINT || process.env.OAUTH_TOKEN_URL || `${OAUTH_ISSUER}/api/oidc/token`;
+const OAUTH_JWKS_URI = process.env.OAUTH_JWKS_URI || `${OAUTH_ISSUER}/jwks.json`;
+const OAUTH_USERINFO_ENDPOINT = process.env.OAUTH_USERINFO_ENDPOINT || `${OAUTH_ISSUER}/api/oidc/userinfo`;
+const OAUTH_INTROSPECTION_ENDPOINT = process.env.OAUTH_INTROSPECTION_ENDPOINT || `${OAUTH_ISSUER}/api/oidc/introspection`;
+const OAUTH_DEVICE_AUTHORIZATION_ENDPOINT = process.env.OAUTH_DEVICE_AUTHORIZATION_ENDPOINT || `${OAUTH_ISSUER}/api/oidc/device-authorization`;
+const OAUTH_SCOPES = (process.env.OAUTH_SCOPE || process.env.OAUTH_SCOPES || '')
+  .split(/[\s,]+/)
+  .map(scope => scope.trim())
+  .filter(scope => scope.length > 0);
+const OAUTH_RESOURCE = process.env.OAUTH_RESOURCE || process.env.MCP_RESOURCE || 'https://mcp.nstam.eu/ssh';
+const OAUTH_CLIENT_ID = process.env.OAUTH_CLIENT_ID || 'mcp';
+
+const oauthProtectedResourceMetadata = sanitizeMetadata({
+  resource: OAUTH_RESOURCE,
+  authorization_servers: [OAUTH_ISSUER],
+  token_endpoint: OAUTH_TOKEN_ENDPOINT,
+  scopes_supported: OAUTH_SCOPES.length ? OAUTH_SCOPES : undefined,
+  bearer_methods_supported: ['authorization_header'],
+});
+
+const oauthAuthorizationServerMetadata = sanitizeMetadata({
+  issuer: OAUTH_ISSUER,
+  authorization_endpoint: OAUTH_AUTHORIZATION_ENDPOINT,
+  token_endpoint: OAUTH_TOKEN_ENDPOINT,
+  jwks_uri: OAUTH_JWKS_URI,
+  response_types_supported: ['code'],
+  grant_types_supported: ['authorization_code', 'client_credentials'],
+  code_challenge_methods_supported: ['S256'],
+  token_endpoint_auth_methods_supported: ['client_secret_basic', 'client_secret_post'],
+  scopes_supported: OAUTH_SCOPES.length ? OAUTH_SCOPES : ['openid', 'profile', 'email'],
+  claims_supported: ['aud', 'iss', 'sub', 'exp', 'iat'],
+  introspection_endpoint: OAUTH_INTROSPECTION_ENDPOINT,
+  device_authorization_endpoint: OAUTH_DEVICE_AUTHORIZATION_ENDPOINT,
+});
+
+const openIdConfiguration = sanitizeMetadata({
+  ...oauthAuthorizationServerMetadata,
+  userinfo_endpoint: OAUTH_USERINFO_ENDPOINT,
+  subject_types_supported: ['public', 'pairwise'],
+  id_token_signing_alg_values_supported: ['RS256'],
+  request_parameter_supported: true,
+  token_endpoint_auth_methods_supported: oauthAuthorizationServerMetadata.token_endpoint_auth_methods_supported,
+  grant_types_supported: oauthAuthorizationServerMetadata.grant_types_supported,
+  response_types_supported: oauthAuthorizationServerMetadata.response_types_supported,
+  scopes_supported: oauthAuthorizationServerMetadata.scopes_supported,
+});
+
+function sanitizeMetadata(metadata) {
+  return Object.fromEntries(
+    Object.entries(metadata).filter(([, value]) => {
+      if (value === undefined || value === null) {
+        return false;
+      }
+      if (Array.isArray(value)) {
+        return value.length > 0;
+      }
+      return true;
+    }),
+  );
+}
+
 // Configuration from environment variables
 const PORT = process.env.PORT || 3009;
 const HOST = process.env.HOST || '0.0.0.0';
@@ -587,6 +651,39 @@ async function main() {
     }));
 
     app.use(express.json());
+
+    const sendAuthorizationServerMetadata = (_req, res) => {
+      res.json(oauthAuthorizationServerMetadata);
+    };
+
+    const sendOpenIdConfiguration = (_req, res) => {
+      res.json(openIdConfiguration);
+    };
+
+    const sendProtectedResourceMetadata = (_req, res) => {
+      res.json(oauthProtectedResourceMetadata);
+    };
+
+    [
+      '/.well-known/oauth-authorization-server',
+      '/.well-known/oauth-authorization-server/:resourceId(*)',
+    ].forEach(path => {
+      app.get(path, sendAuthorizationServerMetadata);
+    });
+
+    [
+      '/.well-known/openid-configuration',
+      '/.well-known/openid-configuration/:resourceId(*)',
+    ].forEach(path => {
+      app.get(path, sendOpenIdConfiguration);
+    });
+
+    [
+      '/.well-known/oauth-protected-resource',
+      '/.well-known/oauth-protected-resource/:resourceId(*)',
+    ].forEach(path => {
+      app.get(path, sendProtectedResourceMetadata);
+    });
 
     // Create SSH client instance
     debugLog("Initializing SSH client...");

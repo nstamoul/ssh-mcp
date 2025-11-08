@@ -32,6 +32,13 @@ services:
       - traefik.http.routers.ssh-mcp.middlewares=chain-authelia@file,ssh-strip@docker
       # Service configuration
       - traefik.http.services.ssh-mcp.loadbalancer.server.port=3009
+      # Secondary router with HTTP basic auth
+      - traefik.http.routers.ssh2.rule=Host(`mcp.nstam.eu`) && PathPrefix(`/ssh2`)
+      - traefik.http.routers.ssh2.entrypoints=https
+      - traefik.http.routers.ssh2.tls=true
+      - traefik.http.middlewares.ssh2-strip.stripprefix.prefixes=/ssh2
+      - traefik.http.routers.ssh2.middlewares=chain-basic-auth@file,ssh2-strip@docker
+      - traefik.http.routers.ssh2.service=ssh-mcp
 
 # External network created by MCP Gateway
 networks:
