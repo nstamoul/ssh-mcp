@@ -7,11 +7,6 @@ services:
       - t2_proxy
     ports:
       - "3009:3009"
-    labels:
-      - "dev.orbstack.domains=ssh-mcp-server.orb.local"
-      - "dev.orbstack.service=ssh-mcp-server"
-      - "dev.orbstack.description=MCP SSH Agent HTTP Server"
-
     # Volume mounts for SSH configuration
     # IMPORTANT: Mount your SSH config and keys as read-only
     volumes:
@@ -24,13 +19,19 @@ services:
       - ${HOME}/.ssh/id_rsa:/home/mcp/.ssh/id_rsa:ro
       - ${HOME}/.ssh/id_rsa:/home/mcp/.ssh/id_rsa_openssh:ro
       - ${HOME}/.ssh/id_rsa:/home/mcp/.ssh/id_rsa_windows:ro
-      # - ${HOME}/.ssh/id_ed25519:/home/mcp/.ssh/id_ed25519:ro
-      # - ${HOME}/.ssh/id_rsa:/home/mcp/.ssh/id_rsa:ro
-      # - ${HOME}/.ssh/id_ed25519:/home/mcp/.ssh/id_ed25519:ro
-      # - ${HOME}/.ssh/id_rsa:/home/mcp/.ssh/id_rsa:ro
-      # If you have specific keys in different locations, add them:
-      # - ${HOME}/.ssh/id_production:/home/mcp/.ssh/id_production:ro
-      # - ${HOME}/.ssh/id_staging:/home/mcp/.ssh/id_staging:ro
+    labels:
+      # Enable Traefik
+      - traefik.enable=true
+      # Router: match host and path prefix
+      - traefik.http.routers.ssh-mcp.rule=Host(`mcp.nstam.eu`) && PathPrefix(`/ssh`)
+      - traefik.http.routers.ssh-mcp.entrypoints=https
+      - traefik.http.routers.ssh-mcp.tls=true
+      # Middleware: strip /ssh prefix
+      - traefik.http.middlewares.ssh-strip.stripprefix.prefixes=/ssh
+      # Apply middleware chain: auth + strip prefix
+      - traefik.http.routers.ssh-mcp.middlewares=chain-authelia@file,ssh-strip@docker
+      # Service configuration
+      - traefik.http.services.ssh-mcp.loadbalancer.server.port=3009
 
 # External network created by MCP Gateway
 networks:
