@@ -35,6 +35,6 @@ services:
 
 # External network created by MCP Gateway
 networks:
-  mcp_gateway:
+  t2_proxy:
     external: true
     name: t2_proxy
