@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project Overview
 
-This is MCP SSH Agent (@aiondadotcom/mcp-ssh) - a Model Context Protocol (MCP) server that provides SSH operations for AI assistants like Claude Desktop. The project uses native SSH commands (`ssh`, `scp`) rather than JavaScript SSH libraries for maximum reliability and compatibility.
+This is MCP SSH Agent (@aiondadotcom/mcp-ssh) - a Model Context Protocol (MCP) server that provides SSH operations for AI assistants like Claude Desktop. The project uses native SSH commands (`ssh`, `scp`) for key-based authentication and the ssh2 JavaScript library for password-based authentication, providing maximum flexibility and compatibility.
 
 ## Development Commands
 
@@ -41,7 +41,7 @@ This is MCP SSH Agent (@aiondadotcom/mcp-ssh) - a Model Context Protocol (MCP) s
 - `bin/mcp-ssh.js` - Binary wrapper for npx compatibility
 
 ### Key Design Decisions
-1. **Native SSH Tools**: Uses system `ssh` and `scp` commands rather than JavaScript SSH libraries for reliability
+1. **Hybrid Authentication**: Uses system `ssh` and `scp` commands for key-based auth (maximum reliability), ssh2 library for password-based auth (flexibility)
 2. **Self-contained**: `server-simple.mjs` includes all code inline to avoid ESM import issues
 3. **Dual Implementation**: TypeScript source in `src/` for development, JavaScript implementation in `server-simple.mjs` for production
 4. **Silent Mode**: Controlled by `MCP_SILENT` environment variable to disable debug output when used as MCP server
@@ -57,12 +57,14 @@ Host discovery prioritizes SSH config entries first, then adds additional hosts 
 ## MCP Tools Provided
 
 1. **listKnownHosts()** - Lists all discovered SSH hosts
-2. **runRemoteCommand(hostAlias, command)** - Execute commands via SSH
+2. **runRemoteCommand(hostAlias, command, password?)** - Execute commands via SSH (supports password auth)
 3. **getHostInfo(hostAlias)** - Get host configuration details
-4. **checkConnectivity(hostAlias)** - Test SSH connectivity
-5. **uploadFile(hostAlias, localPath, remotePath)** - Upload files via SCP
-6. **downloadFile(hostAlias, remotePath, localPath)** - Download files via SCP
-7. **runCommandBatch(hostAlias, commands)** - Execute multiple commands sequentially
+4. **checkConnectivity(hostAlias, password?)** - Test SSH connectivity (supports password auth)
+5. **uploadFile(hostAlias, localPath, remotePath, password?)** - Upload files via SCP/SFTP (supports password auth)
+6. **downloadFile(hostAlias, remotePath, localPath, password?)** - Download files via SCP/SFTP (supports password auth)
+7. **runCommandBatch(hostAlias, commands, password?)** - Execute multiple commands sequentially (supports password auth)
+
+All tools marked with `?` support optional password-based authentication via the `password` parameter. When password is not provided, SSH key-based authentication is used (recommended).
 
 ## Testing and Debugging
 
@@ -97,6 +99,7 @@ Configure in Claude Desktop's `claude_desktop_config.json`:
 
 - `@modelcontextprotocol/sdk` - MCP protocol implementation
 - `ssh-config` - SSH configuration file parsing
+- `ssh2` - SSH2 client library for password-based authentication
 - Node.js built-ins: `child_process`, `fs/promises`, `os`, `path`
 
 ## Desktop Extension Support
@@ -112,6 +115,8 @@ The project supports Desktop Extensions (.dxt) for easy installation in Claude D
 
 - The project is ESM-only (`"type": "module"` in package.json)
 - Production code is in `server-simple.mjs`, not compiled from TypeScript
-- SSH operations require properly configured SSH keys and host access
+- SSH operations support both key-based authentication (recommended) and password-based authentication
+- SSH key-based auth uses native `ssh`/`scp` commands for maximum reliability
+- Password-based auth uses the ssh2 JavaScript library for flexibility
 - The agent runs over STDIO as an MCP server, not as a standalone application
 - DXT packages provide one-click installation alternative to manual JSON configuration

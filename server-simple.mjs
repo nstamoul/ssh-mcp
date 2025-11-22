@@ -21,6 +21,7 @@ const require = createRequire(import.meta.url);
 const { spawn, exec, execFile } = require('child_process');
 const { promisify } = require('util');
 const sshConfig = require('ssh-config');
+const { Client: SSH2Client } = require('ssh2');
 
 const execAsync = promisify(exec);
 const execFileAsync = promisify(execFile);
@@ -233,16 +234,171 @@ class SSHClient {
     return await this.configParser.getAllKnownHosts();
   }
 
-  async runRemoteCommand(hostAlias, command) {
+  /**
+   * Helper method to get connection config for a host
+   * Supports both key-based and password-based authentication
+   */
+  async _getConnectionConfig(hostAlias, password = null) {
+    const hostInfo = await this.getHostInfo(hostAlias);
+
+    // If no host info found, assume it's a direct hostname
+    const config = {
+      host: hostInfo?.hostname || hostAlias,
+      port: hostInfo?.port || 22,
+      username: hostInfo?.user || process.env.USER || 'root'
+    };
+
+    // Use password if provided, otherwise rely on SSH keys
+    if (password) {
+      config.password = password;
+    } else if (hostInfo?.identityFile) {
+      // Let ssh2 use the identity file
+      config.privateKey = await readFile(hostInfo.identityFile.replace('~', homedir()));
+    }
+
+    return config;
+  }
+
+  /**
+   * Execute command using ssh2 library (for password authentication)
+   */
+  async _runRemoteCommandWithPassword(hostAlias, command, password) {
+    return new Promise(async (resolve, reject) => {
+      const conn = new SSH2Client();
+      let stdout = '';
+      let stderr = '';
+
+      try {
+        const config = await this._getConnectionConfig(hostAlias, password);
+
+        conn.on('ready', () => {
+          debugLog(`SSH2 connection ready for ${hostAlias}\n`);
+          conn.exec(command, (err, stream) => {
+            if (err) {
+              conn.end();
+              return reject(err);
+            }
+
+            stream.on('close', (code) => {
+              conn.end();
+              resolve({ stdout, stderr, code: code || 0 });
+            });
+
+            stream.on('data', (data) => {
+              stdout += data.toString();
+            });
+
+            stream.stderr.on('data', (data) => {
+              stderr += data.toString();
+            });
+          });
+        });
+
+        conn.on('error', (err) => {
+          reject(err);
+        });
+
+        conn.connect(config);
+      } catch (error) {
+        reject(error);
+      }
+    });
+  }
+
+  /**
+   * Upload file using ssh2 library (for password authentication)
+   */
+  async _uploadFileWithPassword(hostAlias, localPath, remotePath, password) {
+    return new Promise(async (resolve, reject) => {
+      const conn = new SSH2Client();
+
+      try {
+        const config = await this._getConnectionConfig(hostAlias, password);
+
+        conn.on('ready', () => {
+          debugLog(`SSH2 connection ready for file upload to ${hostAlias}\n`);
+          conn.sftp((err, sftp) => {
+            if (err) {
+              conn.end();
+              return reject(err);
+            }
+
+            sftp.fastPut(localPath, remotePath, (err) => {
+              conn.end();
+              if (err) {
+                return reject(err);
+              }
+              resolve(true);
+            });
+          });
+        });
+
+        conn.on('error', (err) => {
+          reject(err);
+        });
+
+        conn.connect(config);
+      } catch (error) {
+        reject(error);
+      }
+    });
+  }
+
+  /**
+   * Download file using ssh2 library (for password authentication)
+   */
+  async _downloadFileWithPassword(hostAlias, remotePath, localPath, password) {
+    return new Promise(async (resolve, reject) => {
+      const conn = new SSH2Client();
+
+      try {
+        const config = await this._getConnectionConfig(hostAlias, password);
+
+        conn.on('ready', () => {
+          debugLog(`SSH2 connection ready for file download from ${hostAlias}\n`);
+          conn.sftp((err, sftp) => {
+            if (err) {
+              conn.end();
+              return reject(err);
+            }
+
+            sftp.fastGet(remotePath, localPath, (err) => {
+              conn.end();
+              if (err) {
+                return reject(err);
+              }
+              resolve(true);
+            });
+          });
+        });
+
+        conn.on('error', (err) => {
+          reject(err);
+        });
+
+        conn.connect(config);
+      } catch (error) {
+        reject(error);
+      }
+    });
+  }
+
+  async runRemoteCommand(hostAlias, command, password = null) {
     try {
+      // Use ssh2 library if password is provided, otherwise use native SSH
+      if (password) {
+        debugLog(`Executing with password auth: ${command} on ${hostAlias}\n`);
+        return await this._runRemoteCommandWithPassword(hostAlias, command, password);
+      }
+
       // Use execFile for security - prevents command injection
       debugLog(`Executing: ssh ${hostAlias} ${command}\n`);
-      
+
       const { stdout, stderr } = await execFileAsync('ssh', [hostAlias, command], {
         timeout: 30000, // 30 second timeout
         maxBuffer: 1024 * 1024 * 10 // 10MB buffer
       });
-      
+
       return {
         stdout: stdout || '',
         stderr: stderr || '',
@@ -263,12 +419,12 @@ class SSHClient {
     return hosts.find(host => host.alias === hostAlias || host.hostname === hostAlias) || null;
   }
 
-  async checkConnectivity(hostAlias) {
+  async checkConnectivity(hostAlias, password = null) {
     try {
       // Simple connectivity test using ssh
-      const result = await this.runRemoteCommand(hostAlias, 'echo connected');
+      const result = await this.runRemoteCommand(hostAlias, 'echo connected', password);
       const connected = result.code === 0 && result.stdout.trim() === 'connected';
-      
+
       return {
         connected,
         message: connected ? 'Connection successful' : 'Connection failed'
@@ -282,11 +438,17 @@ class SSHClient {
     }
   }
 
-  async uploadFile(hostAlias, localPath, remotePath) {
+  async uploadFile(hostAlias, localPath, remotePath, password = null) {
     try {
+      // Use ssh2 library if password is provided, otherwise use native SCP
+      if (password) {
+        debugLog(`Uploading file with password auth: ${localPath} to ${hostAlias}:${remotePath}\n`);
+        return await this._uploadFileWithPassword(hostAlias, localPath, remotePath, password);
+      }
+
       debugLog(`Executing: scp ${localPath} ${hostAlias}:${remotePath}\n`);
-      
-      await execFileAsync('scp', [localPath, `${hostAlias}:${remotePath}`], { 
+
+      await execFileAsync('scp', [localPath, `${hostAlias}:${remotePath}`], {
         timeout: 60000 // 60 second timeout for file transfer
       });
       return true;
@@ -296,11 +458,17 @@ class SSHClient {
     }
   }
 
-  async downloadFile(hostAlias, remotePath, localPath) {
+  async downloadFile(hostAlias, remotePath, localPath, password = null) {
     try {
+      // Use ssh2 library if password is provided, otherwise use native SCP
+      if (password) {
+        debugLog(`Downloading file with password auth: ${hostAlias}:${remotePath} to ${localPath}\n`);
+        return await this._downloadFileWithPassword(hostAlias, remotePath, localPath, password);
+      }
+
       debugLog(`Executing: scp ${hostAlias}:${remotePath} ${localPath}\n`);
-      
-      await execFileAsync('scp', [`${hostAlias}:${remotePath}`, localPath], { 
+
+      await execFileAsync('scp', [`${hostAlias}:${remotePath}`, localPath], {
         timeout: 60000 // 60 second timeout for file transfer
       });
       return true;
@@ -310,21 +478,21 @@ class SSHClient {
     }
   }
 
-  async runCommandBatch(hostAlias, commands) {
+  async runCommandBatch(hostAlias, commands, password = null) {
     try {
       const results = [];
       let success = true;
-      
+
       for (const command of commands) {
-        const result = await this.runRemoteCommand(hostAlias, command);
+        const result = await this.runRemoteCommand(hostAlias, command, password);
         results.push(result);
-        
+
         if (result.code !== 0) {
           success = false;
           // Continue executing remaining commands
         }
       }
-      
+
       return {
         results,
         success
@@ -374,7 +542,7 @@ async function main() {
           },
           {
             name: "runRemoteCommand",
-            description: "Executes a shell command on an SSH host",
+            description: "Executes a shell command on an SSH host. Supports both key-based (default) and password-based authentication.",
             inputSchema: {
               type: "object",
               properties: {
@@ -385,6 +553,10 @@ async function main() {
                 command: {
                   type: "string",
                   description: "The shell command to execute",
+                },
+                password: {
+                  type: "string",
+                  description: "Optional password for password-based authentication. If not provided, SSH keys will be used.",
                 },
               },
               required: ["hostAlias", "command"],
@@ -406,7 +578,7 @@ async function main() {
           },
           {
             name: "checkConnectivity",
-            description: "Checks if an SSH connection to the host is possible",
+            description: "Checks if an SSH connection to the host is possible. Supports both key-based (default) and password-based authentication.",
             inputSchema: {
               type: "object",
               properties: {
@@ -414,13 +586,17 @@ async function main() {
                   type: "string",
                   description: "Alias or hostname of the SSH host",
                 },
+                password: {
+                  type: "string",
+                  description: "Optional password for password-based authentication. If not provided, SSH keys will be used.",
+                },
               },
               required: ["hostAlias"],
             },
           },
           {
             name: "uploadFile",
-            description: "Uploads a local file to an SSH host",
+            description: "Uploads a local file to an SSH host. Supports both key-based (default) and password-based authentication.",
             inputSchema: {
               type: "object",
               properties: {
@@ -436,13 +612,17 @@ async function main() {
                   type: "string",
                   description: "Path on the remote host",
                 },
+                password: {
+                  type: "string",
+                  description: "Optional password for password-based authentication. If not provided, SSH keys will be used.",
+                },
               },
               required: ["hostAlias", "localPath", "remotePath"],
             },
           },
           {
             name: "downloadFile",
-            description: "Downloads a file from an SSH host",
+            description: "Downloads a file from an SSH host. Supports both key-based (default) and password-based authentication.",
             inputSchema: {
               type: "object",
               properties: {
@@ -458,13 +638,17 @@ async function main() {
                   type: "string",
                   description: "Path to the local destination",
                 },
+                password: {
+                  type: "string",
+                  description: "Optional password for password-based authentication. If not provided, SSH keys will be used.",
+                },
               },
               required: ["hostAlias", "remotePath", "localPath"],
             },
           },
           {
             name: "runCommandBatch",
-            description: "Executes multiple shell commands sequentially on an SSH host",
+            description: "Executes multiple shell commands sequentially on an SSH host. Supports both key-based (default) and password-based authentication.",
             inputSchema: {
               type: "object",
               properties: {
@@ -476,6 +660,10 @@ async function main() {
                   type: "array",
                   items: { type: "string" },
                   description: "List of shell commands to execute",
+                },
+                password: {
+                  type: "string",
+                  description: "Optional password for password-based authentication. If not provided, SSH keys will be used.",
                 },
               },
               required: ["hostAlias", "commands"],
@@ -506,7 +694,8 @@ async function main() {
           case "runRemoteCommand": {
             const result = await sshClient.runRemoteCommand(
               args.hostAlias,
-              args.command
+              args.command,
+              args.password
             );
             return {
               content: [{ type: "text", text: JSON.stringify(result, null, 2) }],
@@ -521,7 +710,7 @@ async function main() {
           }
 
           case "checkConnectivity": {
-            const status = await sshClient.checkConnectivity(args.hostAlias);
+            const status = await sshClient.checkConnectivity(args.hostAlias, args.password);
             return {
               content: [{ type: "text", text: JSON.stringify(status, null, 2) }],
             };
@@ -531,7 +720,8 @@ async function main() {
             const success = await sshClient.uploadFile(
               args.hostAlias,
               args.localPath,
-              args.remotePath
+              args.remotePath,
+              args.password
             );
             return {
               content: [{ type: "text", text: JSON.stringify({ success }, null, 2) }],
@@ -542,7 +732,8 @@ async function main() {
             const success = await sshClient.downloadFile(
               args.hostAlias,
               args.remotePath,
-              args.localPath
+              args.localPath,
+              args.password
             );
             return {
               content: [{ type: "text", text: JSON.stringify({ success }, null, 2) }],
@@ -552,7 +743,8 @@ async function main() {
           case "runCommandBatch": {
             const result = await sshClient.runCommandBatch(
               args.hostAlias,
-              args.commands
+              args.commands,
+              args.password
             );
             return {
               content: [{ type: "text", text: JSON.stringify(result, null, 2) }],

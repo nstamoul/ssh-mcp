@@ -71,10 +71,11 @@ This screenshot demonstrates the MCP SSH Agent integrated with Claude, showing h
 
 ## Key Features
 
-- **Reliable SSH**: Uses native `ssh`/`scp` commands instead of JavaScript SSH libraries
+- **Reliable SSH**: Uses native `ssh`/`scp` commands for key-based auth, ssh2 library for password auth
 - **Automatic Discovery**: Finds hosts from SSH config and known_hosts files
+- **Flexible Authentication**: Supports both SSH key-based (default) and password-based authentication
 - **Full SSH Support**: Works with SSH agents, keys, and all authentication methods
-- **File Operations**: Upload and download files using `scp`
+- **File Operations**: Upload and download files using `scp` or SFTP
 - **Batch Commands**: Execute multiple commands in sequence
 - **Error Handling**: Comprehensive error reporting with timeouts
 
@@ -83,12 +84,14 @@ This screenshot demonstrates the MCP SSH Agent integrated with Claude, showing h
 The agent provides the following MCP tools:
 
 1. **listKnownHosts()** - Lists all known SSH hosts, prioritizing entries from ~/.ssh/config first, then additional hosts from ~/.ssh/known_hosts
-2. **runRemoteCommand(hostAlias, command)** - Executes a command on a remote host using `ssh`
+2. **runRemoteCommand(hostAlias, command, password?)** - Executes a command on a remote host using `ssh` (key-based) or ssh2 (password-based)
 3. **getHostInfo(hostAlias)** - Returns detailed configuration for a specific host
-4. **checkConnectivity(hostAlias)** - Tests SSH connectivity to a host
-5. **uploadFile(hostAlias, localPath, remotePath)** - Uploads a file to the remote host using `scp`
-6. **downloadFile(hostAlias, remotePath, localPath)** - Downloads a file from the remote host using `scp`
-7. **runCommandBatch(hostAlias, commands)** - Executes multiple commands sequentially
+4. **checkConnectivity(hostAlias, password?)** - Tests SSH connectivity to a host with optional password authentication
+5. **uploadFile(hostAlias, localPath, remotePath, password?)** - Uploads a file to the remote host using `scp` or SFTP
+6. **downloadFile(hostAlias, remotePath, localPath, password?)** - Downloads a file from the remote host using `scp` or SFTP
+7. **runCommandBatch(hostAlias, commands, password?)** - Executes multiple commands sequentially
+
+All functions marked with `?` support an optional `password` parameter for password-based authentication. If not provided, SSH key-based authentication is used.
 
 ## Configuration Examples
 
@@ -338,9 +341,61 @@ Run with debug output to see detailed operation logs:
 MCP_SILENT=false npx @aiondadotcom/mcp-ssh
 ```
 
+## Authentication Methods
+
+The MCP SSH Agent supports two authentication methods:
+
+### 1. SSH Key-Based Authentication (Recommended)
+
+SSH key authentication is the **recommended and most secure** method. It's the default when no password is provided.
+
+**Advantages:**
+- More secure than passwords
+- No credentials stored or transmitted
+- Uses native SSH commands for maximum reliability
+- Works with SSH agents and key management tools
+- Supports jump hosts and complex proxy configurations
+
+**See the [SSH Key Setup Guide](#ssh-key-setup-guide) below for detailed setup instructions.**
+
+### 2. Password-Based Authentication
+
+Password authentication is available as an alternative for systems where SSH key setup is not possible.
+
+**⚠️ Security Warning:**
+- Passwords are transmitted and stored in memory
+- Less secure than SSH keys
+- Should only be used when SSH keys are not feasible
+- Not recommended for production environments
+
+**Usage:**
+
+Simply provide the optional `password` parameter when calling any SSH function:
+
+```javascript
+// Example: Run command with password authentication
+runRemoteCommand("myserver", "ls -la", "mypassword")
+
+// Example: Upload file with password authentication
+uploadFile("myserver", "/local/file.txt", "/remote/file.txt", "mypassword")
+```
+
+**When to use password authentication:**
+- Legacy systems that don't support SSH keys
+- Temporary access scenarios
+- Testing and development environments
+- Systems where you don't have permission to add SSH keys
+
+**Best Practices:**
+- Only use password auth when SSH keys are not available
+- Use strong, unique passwords
+- Consider this a temporary solution and migrate to SSH keys when possible
+- Never hardcode passwords in scripts or configuration files
+- Be aware that Claude will see the password when you provide it
+
 ## SSH Key Setup Guide
 
-For the MCP SSH Agent to work properly, you need to set up SSH key authentication. Here's a complete guide:
+For the MCP SSH Agent to work with key-based authentication (recommended), you need to set up SSH keys. Here's a complete guide:
 
 ### 1. Creating SSH Keys
 
@@ -354,7 +409,7 @@ ssh-keygen -t ed25519 -C "your-email@example.com"
 ssh-keygen -t rsa -b 4096 -C "your-email@example.com"
 ```
 
-**Important**: When prompted for a passphrase, **leave it empty** (press Enter). The MCP SSH Agent cannot handle password-protected keys as it runs non-interactively.
+**Important**: When prompted for a passphrase, **leave it empty** (press Enter). The MCP SSH Agent cannot handle passphrase-protected keys as it runs non-interactively. If you need password authentication, use the password parameter instead of key passphrases.
 
 ```
 Enter passphrase (empty for no passphrase): [Press Enter]
@@ -492,12 +547,15 @@ Host staging
 
 ## Security Best Practices
 
-### SSH Key Security
-- **Never use password-protected keys** with MCP SSH Agent
+### Authentication Security
+- **Prefer SSH keys over passwords** - SSH keys are more secure
+- **Never use passphrase-protected keys** with MCP SSH Agent (use password auth instead if needed)
 - **Never share private keys** - they should stay on your machine only
+- **Use strong passwords** if using password authentication
+- **Be aware of password visibility** - Claude will see passwords when you provide them
 - **Use Ed25519 keys** when possible (more secure than RSA)
 - **Create separate keys** for different environments/purposes
-- **Regularly rotate keys** (every 6-12 months)
+- **Regularly rotate credentials** (keys every 6-12 months, passwords more frequently)
 
 ### Server Security
 - **Disable password authentication** completely
