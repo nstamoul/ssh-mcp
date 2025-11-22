@@ -1,0 +1,43 @@
+# Git
+.git
+.gitignore
+
+# Documentation
+*.md
+!package.json
+doc/
+
+# Development files
+src/
+tsconfig.json
+.env
+.env.*
+!.env.example
+
+# Build artifacts
+build/
+*.dxt
+
+# Node
+node_modules/
+npm-debug.log
+yarn-error.log
+
+# IDE
+.vscode/
+.idea/
+
+# Scripts not needed in container
+start.sh
+start-silent.sh
+start-http.sh
+start-http-silent.sh
+scripts/
+
+# STDIO server files (not needed for HTTP container)
+server-simple.mjs
+bin/mcp-ssh.js
+
+# Testing
+test/
+*.test.js

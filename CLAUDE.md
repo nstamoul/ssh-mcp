@@ -4,20 +4,27 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project Overview
 
-This is MCP SSH Agent (@aiondadotcom/mcp-ssh) - a Model Context Protocol (MCP) server that provides SSH operations for AI assistants like Claude Desktop. The project uses native SSH commands (`ssh`, `scp`) rather than JavaScript SSH libraries for maximum reliability and compatibility.
+This is MCP SSH Agent (@aiondadotcom/mcp-ssh) - a Model Context Protocol (MCP) server that provides SSH operations for AI assistants like Claude Desktop. The project supports both STDIO and HTTP/SSE transports and uses native SSH commands (`ssh`, `scp`) rather than JavaScript SSH libraries for maximum reliability and compatibility.
 
 ## Development Commands
 
-### Basic Operations
+### Basic Operations (STDIO Mode)
 - `npm start` - Start the MCP server (same as `npm run dev`)
 - `npm run dev` - Start the MCP server with debug output
 - `npm run build` - Currently a no-op (echo "Build skipped")
 - `npm test` - Currently a no-op (echo "No tests specified")
 
-### Development Scripts
-- `./start.sh` - Start the server with debug output
-- `./start-silent.sh` - Start the server in silent mode (no debug output)
-- `node server-simple.mjs` - Direct server execution
+### HTTP Server Operations
+- `npm run start:http` - Start the HTTP server (production mode)
+- `npm run dev:http` - Start the HTTP server with debug output
+- `./start-http.sh` - Start the HTTP server with debug output
+- `./start-http-silent.sh` - Start the HTTP server in silent mode
+- `node server-http.mjs` - Direct HTTP server execution
+
+### Development Scripts (STDIO Mode)
+- `./start.sh` - Start the STDIO server with debug output
+- `./start-silent.sh` - Start the STDIO server in silent mode
+- `node server-simple.mjs` - Direct STDIO server execution
 
 ### Publishing
 - `npm version patch|minor|major` - Bump version and create git tag
@@ -30,21 +37,24 @@ This is MCP SSH Agent (@aiondadotcom/mcp-ssh) - a Model Context Protocol (MCP) s
 
 ## Architecture
 
-### Main Entry Point
-- `server-simple.mjs` - Self-contained MCP server implementation that includes all functionality inline to avoid module resolution issues
+### Main Entry Points
+- `server-simple.mjs` - STDIO-based MCP server (default, for local use with Claude Desktop)
+- `server-http.mjs` - HTTP-based MCP server with SSE streaming (for remote/network access)
 
 ### Source Structure (Development)
 - `src/` - TypeScript source files (currently not compiled/used in production)
   - `ssh-client.ts` - SSH operations using node-ssh library (development version)
   - `ssh-config-parser.ts` - SSH config parsing utilities
   - `types.ts` - TypeScript type definitions
-- `bin/mcp-ssh.js` - Binary wrapper for npx compatibility
+- `bin/mcp-ssh.js` - Binary wrapper for STDIO server (npx compatibility)
+- `bin/mcp-ssh-http.js` - Binary wrapper for HTTP server (npx compatibility)
 
 ### Key Design Decisions
 1. **Native SSH Tools**: Uses system `ssh` and `scp` commands rather than JavaScript SSH libraries for reliability
-2. **Self-contained**: `server-simple.mjs` includes all code inline to avoid ESM import issues
-3. **Dual Implementation**: TypeScript source in `src/` for development, JavaScript implementation in `server-simple.mjs` for production
-4. **Silent Mode**: Controlled by `MCP_SILENT` environment variable to disable debug output when used as MCP server
+2. **Self-contained**: Both server implementations include all code inline to avoid ESM import issues
+3. **Dual Transport**: Supports both STDIO (local) and HTTP/SSE (network) transports
+4. **Dual Implementation**: TypeScript source in `src/` for development, JavaScript implementations in `server-*.mjs` for production
+5. **Silent Mode**: STDIO server uses `MCP_SILENT` environment variable; HTTP server uses `DEBUG` environment variable
 
 ## SSH Configuration Integration
 
@@ -95,9 +105,17 @@ Configure in Claude Desktop's `claude_desktop_config.json`:
 
 ## Dependencies
 
-- `@modelcontextprotocol/sdk` - MCP protocol implementation
+### Production Dependencies
+- `@modelcontextprotocol/sdk` - MCP protocol implementation (STDIO and SSE transports)
 - `ssh-config` - SSH configuration file parsing
+- `express` - HTTP server framework (for HTTP mode)
+- `cors` - Cross-Origin Resource Sharing middleware (for HTTP mode)
+- `glob` - File pattern matching for SSH config includes
 - Node.js built-ins: `child_process`, `fs/promises`, `os`, `path`
+
+### Development Dependencies
+- `@anthropic-ai/dxt` - Desktop Extension packaging tools
+- TypeScript and type definitions
 
 ## Desktop Extension Support
 
@@ -111,7 +129,13 @@ The project supports Desktop Extensions (.dxt) for easy installation in Claude D
 ## Important Notes
 
 - The project is ESM-only (`"type": "module"` in package.json)
-- Production code is in `server-simple.mjs`, not compiled from TypeScript
+- Production code is in `server-simple.mjs` (STDIO) and `server-http.mjs` (HTTP), not compiled from TypeScript
 - SSH operations require properly configured SSH keys and host access
-- The agent runs over STDIO as an MCP server, not as a standalone application
+- The agent can run in two modes:
+  - **STDIO mode**: For local use with Claude Desktop (default)
+  - **HTTP mode**: For remote/network access via HTTP with SSE streaming
 - DXT packages provide one-click installation alternative to manual JSON configuration
+- For detailed HTTP server documentation, see `HTTP-SERVER.md`
+- Configuration files:
+  - `.env.example` - Environment variable examples for HTTP server
+  - `HTTP-SERVER.md` - Complete HTTP server documentation

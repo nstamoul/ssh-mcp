@@ -6,6 +6,15 @@ A Model Context Protocol (MCP) server for managing and controlling SSH connectio
 
 This MCP server provides SSH operations through a clean, standardized interface that can be used by MCP-compatible language models like Claude Desktop. The server automatically discovers SSH hosts from your `~/.ssh/config` and `~/.ssh/known_hosts` files and executes commands using native SSH tools for maximum reliability.
 
+### Transport Modes
+
+The MCP SSH Agent supports two transport modes:
+
+- **STDIO Mode** (Default): For local use with Claude Desktop via standard input/output
+- **HTTP Mode**: For remote/network access using HTTP with Server-Sent Events (SSE) streaming
+
+See [HTTP-SERVER.md](HTTP-SERVER.md) for detailed HTTP server documentation.
+
 ## Quick Start
 
 ### Desktop Extension Installation (Recommended)
@@ -56,6 +65,35 @@ cd mcp-ssh
 npm install
 npm start
 ```
+
+### Running as HTTP Server
+
+To run the MCP SSH Agent as a network-accessible HTTP server with SSE streaming:
+
+```bash
+# Using npm scripts
+npm run start:http
+
+# With debug logging
+npm run dev:http
+
+# Using npx
+npx @aiondadotcom/mcp-ssh-http
+
+# Direct execution
+node server-http.mjs
+```
+
+Configuration via environment variables:
+
+```bash
+export PORT=3009          # Port to listen on (default: 3009)
+export HOST=0.0.0.0       # Host to bind to (default: 0.0.0.0)
+export DEBUG=true         # Enable debug logging (default: false)
+npm run start:http
+```
+
+For detailed HTTP server documentation, deployment guides, and security considerations, see [HTTP-SERVER.md](HTTP-SERVER.md).
 
 ## Example Usage
 
@@ -562,15 +600,23 @@ MIT License - see LICENSE file for details.
 
 ```
 mcp-ssh/
-├── server-simple.mjs          # Main MCP server implementation
+├── server-simple.mjs          # STDIO MCP server implementation
+├── server-http.mjs            # HTTP/SSE MCP server implementation
 ├── manifest.json              # DXT package manifest
 ├── package.json               # Dependencies and scripts
-├── README.md                  # Documentation
+├── README.md                  # Main documentation
+├── HTTP-SERVER.md             # HTTP server documentation
 ├── LICENSE                    # MIT License
 ├── CHANGELOG.md               # Release history
 ├── PUBLISHING.md              # Publishing instructions
-├── start.sh                   # Development startup script
-├── start-silent.sh            # Silent startup script
+├── .env.example               # Environment variable examples
+├── start.sh                   # STDIO server startup script
+├── start-silent.sh            # STDIO silent startup script
+├── start-http.sh              # HTTP server startup script
+├── start-http-silent.sh       # HTTP silent startup script
+├── bin/
+│   ├── mcp-ssh.js             # STDIO server binary wrapper
+│   └── mcp-ssh-http.js        # HTTP server binary wrapper
 ├── scripts/
 │   └── build-dxt.sh           # DXT package build script
 ├── doc/

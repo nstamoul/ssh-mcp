@@ -5,6 +5,54 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.2.0] - 2025-11-08
+
+### Added
+- **NEW FEATURE**: HTTP Server with Server-Sent Events (SSE) streaming support
+- Added `server-http.mjs` - HTTP-based MCP server for network access
+- Added `bin/mcp-ssh-http.js` - Binary wrapper for HTTP server
+- Added HTTP server startup scripts (`start-http.sh`, `start-http-silent.sh`)
+- Added `.env.example` - Environment variable configuration examples
+- Added `HTTP-SERVER.md` - Comprehensive HTTP server documentation
+- New npm scripts: `npm run start:http` and `npm run dev:http`
+- **Production Docker Deployment**:
+  - Added production-ready `Dockerfile` with multi-stage build
+  - Added `docker-compose.yml` for MCP Gateway integration
+  - Added `Makefile` for simplified Docker operations
+  - Added `DOCKER.md` - Complete Docker deployment guide
+  - Added `DEPLOYMENT.md` - MCP Gateway integration guide
+  - Added `.dockerignore` for optimized builds
+
+### Enhanced
+- Dual transport support: STDIO (local) and HTTP/SSE (network)
+- Environment-based configuration for HTTP mode (PORT, HOST, DEBUG)
+- CORS support for web clients
+- Health check endpoint (`/health`)
+- Graceful shutdown handling for HTTP server
+- Updated documentation with HTTP mode examples
+- **Changed default port from 3000 to 3009** for consistency with MCP Gateway deployments
+
+### Dependencies
+- Added `express` (^4.21.2) for HTTP server
+- Added `cors` (^2.8.5) for Cross-Origin Resource Sharing
+
+### Documentation
+- Comprehensive HTTP server guide with deployment examples
+- Docker and systemd deployment configurations
+- Security best practices for network deployments
+- Updated README with HTTP mode instructions
+- Updated CLAUDE.md with HTTP server commands
+- Complete Docker deployment and MCP Gateway integration guides
+- Makefile for common operations
+
+### Docker & Deployment
+- Multi-stage Docker build for minimal image size
+- Non-root container user for security
+- Read-only SSH key mounts
+- Integration with `mcp_gateway` Docker network
+- Health checks and auto-restart policies
+- Complete Caddy reverse proxy configuration examples
+
 ## [1.1.0] - 2025-08-17
 
 ### Added
