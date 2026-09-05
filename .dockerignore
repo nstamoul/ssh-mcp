@@ -1,6 +1,7 @@
 # Git
 .git
 .gitignore
+.github
 
 # Documentation
 *.md
@@ -23,9 +24,10 @@ node_modules/
 npm-debug.log
 yarn-error.log
 
-# IDE
+# IDE and agent state
 .vscode/
 .idea/
+.claude/
 
 # Scripts not needed in container
 start.sh
@@ -40,4 +42,5 @@ bin/mcp-ssh.js
 
 # Testing
 test/
+tests/
 *.test.js
