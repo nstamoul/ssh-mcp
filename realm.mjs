@@ -104,6 +104,7 @@ export function loadRealms(file = REALMS_FILE, env = process.env) {
         loginPath: realm.customers.loginPath || 'kv/data/{tenant}/login',
         jump: realm.customers.jump,
         skipTenants: realm.customers.skipTenants || [],
+        slotMap: realm.customers.slotMap || {},
       } : null,
       hosts: Object.entries(realm.hosts || {}).map(([alias, host]) => normalizeHost(alias, host, name)),
     };

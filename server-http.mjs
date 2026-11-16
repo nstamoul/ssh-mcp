@@ -420,14 +420,15 @@ class SSHClient {
         return { failure: { kind: 'vault_setup', message: `${device.name} has no tenant in Nautobot, so there is no login to use.` }, realm: info };
       }
       const directory = this.slotDirs.get(realm.name);
-      let slot = pickSlot(await directory.slots(), device.hostname);
-      if (!slot) slot = pickSlot(await directory.slots({ fresh: true }), device.hostname);
+      const { slotMap } = realm.customers;
+      let slot = pickSlot(await directory.slots(), device.hostname, device.tenant, slotMap);
+      if (!slot) slot = pickSlot(await directory.slots({ fresh: true }), device.hostname, device.tenant, slotMap);
       if (!slot) {
         return {
           failure: {
             kind: 'no_vpn',
-            message: `No open VPN slot routes ${device.hostname} (${device.name}, tenant ${device.tenant}).`,
-            hint: "Open the tenant's VPN in Nautobot's VPN manager, then try again.",
+            message: `No open VPN slot of tenant ${device.tenant} routes ${device.hostname} (${device.name}).`,
+            hint: "Open the tenant's VPN in Nautobot's VPN manager, then try again. Another tenant's VPN is never used.",
           },
           realm: info,
         };
@@ -646,7 +647,7 @@ class SSHClient {
       const { device, realm } = customer;
       let vpn = null;
       try {
-        vpn = pickSlot(await this.slotDirs.get(realm.name).slots(), device.hostname)?.slug || null;
+        vpn = pickSlot(await this.slotDirs.get(realm.name).slots(), device.hostname, device.tenant, realm.customers.slotMap)?.slug || null;
       } catch (error) {
         debugLog(`Slot lookup failed: ${error.message}`);
       }

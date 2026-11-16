@@ -13,6 +13,7 @@ import {
   parseNet,
   parseSlots,
   pickSlot,
+  tenantSlug,
   proxyCommand,
   relayCommand,
 } from '../customers.mjs';
@@ -33,15 +34,27 @@ test('isIPv4 and parseNet', () => {
   assert.equal(parseNet('bogus/8'), null);
 });
 
-test('pickSlot takes the most specific route of a running slot', () => {
+test("pickSlot uses only the tenant's own running slot, most specific route first", () => {
   const slots = parseSlots(SLOTS);
   assert.equal(slots.length, 3);
-  assert.equal(pickSlot(slots, '172.18.18.26').slug, 'axepa');
-  assert.equal(pickSlot(slots, '10.33.1.1').slug, 'zenith', '/13 beats /8');
-  assert.equal(pickSlot(slots, '10.1.1.1').slug, 'axepa');
-  assert.equal(pickSlot(slots, '10.40.1.1').slug, 'axepa', 'a slot without a running worker is skipped');
-  assert.equal(pickSlot(slots, '192.168.1.1'), null);
-  assert.equal(pickSlot(slots, 'name'), null);
+  assert.equal(pickSlot(slots, '172.18.18.26', 'AXEPA').slug, 'axepa');
+  assert.equal(pickSlot(slots, '10.33.1.1', 'Zenith').slug, 'zenith');
+  // 10.0.0.0/8 of AXEPA covers this address, but the device belongs to ENA-ON.
+  assert.equal(pickSlot(slots, '10.250.255.1', 'ENA-ON'), null, "another tenant's slot is never used");
+  assert.equal(pickSlot(slots, '10.33.1.1', 'AXEPA').slug, 'axepa', 'own slot, broad route');
+  assert.equal(pickSlot(slots, '10.40.1.1', 'Dodoni'), null, 'a slot without a running worker is skipped');
+  assert.equal(pickSlot(slots, '192.168.1.1', 'AXEPA'), null, 'own slot does not route it');
+  assert.equal(pickSlot(slots, '172.18.18.26', null), null);
+  assert.equal(pickSlot(slots, 'name', 'AXEPA'), null);
+  assert.equal(pickSlot(slots, '10.40.1.1', 'Ioannina Lab', { 'Ioannina Lab': 'zenith' }), null, 'override slug must still route the address');
+  assert.equal(pickSlot(slots, '10.33.1.1', 'Ioannina Lab', { 'Ioannina Lab': 'zenith' }).slug, 'zenith');
+});
+
+test('tenantSlug matches the VPN slot naming', () => {
+  assert.equal(tenantSlug('AXEPA'), 'axepa');
+  assert.equal(tenantSlug('ENA-ON'), 'ena-on');
+  assert.equal(tenantSlug('Alpha Bank'), 'alpha-bank');
+  assert.equal(tenantSlug('e-Trikala'), 'e-trikala');
 });
 
 test('relayCommand refuses values that could break the shell', () => {

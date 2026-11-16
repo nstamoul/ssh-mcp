@@ -63,13 +63,24 @@ export function parseSlots(text) {
   });
 }
 
-/** The running slot with the most specific route containing ip. */
-export function pickSlot(slots, ip) {
-  if (!isIPv4(ip)) return null;
+/** Nautobot tenant name -> VPN slot slug ("Alpha Bank" -> "alpha-bank"). */
+export function tenantSlug(tenant) {
+  return String(tenant || '').toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '');
+}
+
+/**
+ * The tenant's own running slot, if one of its routes contains ip (most
+ * specific route wins). Only the tenant's slot is considered: slots announce
+ * broad routes (10.0.0.0/8), and another tenant's slot must never receive a
+ * login meant for this tenant. slotMap overrides the slug for a tenant.
+ */
+export function pickSlot(slots, ip, tenant, slotMap = {}) {
+  if (!isIPv4(ip) || !tenant) return null;
+  const wanted = slotMap[tenant] || tenantSlug(tenant);
   const addr = ipToInt(ip);
   let best = null;
   for (const slot of slots) {
-    if (!slot.up) continue;
+    if (!slot.up || slot.slug !== wanted) continue;
     for (const net of slot.nets) {
       if (((addr & net.mask) >>> 0) === net.base && (!best || net.bits > best.bits)) best = { slot, bits: net.bits };
     }
