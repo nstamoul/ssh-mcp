@@ -26,15 +26,15 @@ WORKDIR /app
 # Create non-root user for security
 RUN addgroup -g 1001 -S mcp && \
     adduser -S mcp -u 1001 -G mcp && \
-    mkdir -p /home/mcp/.ssh && \
-    chown -R mcp:mcp /home/mcp/.ssh && \
-    chmod 700 /home/mcp/.ssh
+    mkdir -p /home/mcp/.ssh /home/mcp/.ssh-mcp && \
+    chown -R mcp:mcp /home/mcp/.ssh /home/mcp/.ssh-mcp && \
+    chmod 700 /home/mcp/.ssh /home/mcp/.ssh-mcp
 
 # Copy dependencies from deps stage
 COPY --from=deps /app/node_modules ./node_modules
 
 # Copy application files
-COPY --chown=mcp:mcp server-http.mjs ./
+COPY --chown=mcp:mcp server-http.mjs ssh-exec.mjs ./
 COPY --chown=mcp:mcp package.json ./
 
 # Switch to non-root user
