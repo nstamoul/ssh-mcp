@@ -13,6 +13,7 @@ import { homedir } from 'os';
 import { readFile } from 'fs/promises';
 import { join } from 'path';
 import { createRequire } from 'module';
+import { assertSafeTarget, classifySshFailure, ensureKnownHosts, replaceHostKey, sshOptions } from './ssh-exec.mjs';
 
 // Use createRequire to work around ESM import issues
 const require = createRequire(import.meta.url);
@@ -299,29 +300,34 @@ class SSHClient {
     return await this.configParser.getAllKnownHosts();
   }
 
-  async runRemoteCommand(hostAlias, command) {
+  // Runs ssh or scp without ever prompting. A failure of ssh itself (as
+  // opposed to a non-zero remote exit) comes back as `error` with a `kind`.
+  async exec(binary, args, timeout) {
+    ensureKnownHosts();
     try {
-      // Use execFile for security - prevents command injection
-      debugLog(`Executing: ssh ${hostAlias} ${command}`);
-
-      const { stdout, stderr } = await execFileAsync('ssh', [hostAlias, command], {
-        timeout: 30000, // 30 second timeout
+      const { stdout, stderr } = await execFileAsync(binary, [...sshOptions(), ...args], {
+        timeout,
         maxBuffer: 1024 * 1024 * 10 // 10MB buffer
       });
-
-      return {
-        stdout: stdout || '',
-        stderr: stderr || '',
-        code: 0
-      };
+      return { stdout: stdout || '', stderr: stderr || '', code: 0 };
     } catch (error) {
-      debugLog(`Error executing command on ${hostAlias}: ${error.message}`);
-      return {
+      const stderr = typeof error.stderr === 'string' ? error.stderr : error.message;
+      const result = {
         stdout: error.stdout || '',
-        stderr: error.stderr || error.message,
-        code: error.code || 1
+        stderr,
+        code: typeof error.code === 'number' ? error.code : 255
       };
+      const failure = classifySshFailure(error, stderr);
+      if (failure) result.error = failure;
+      debugLog(`${binary} failed (${failure ? failure.kind : 'remote exit ' + result.code})`);
+      return result;
     }
+  }
+
+  async runRemoteCommand(hostAlias, command) {
+    assertSafeTarget(hostAlias);
+    debugLog(`Executing: ssh ${hostAlias} ${command}`);
+    return await this.exec('ssh', ['--', hostAlias, command], 30000);
   }
 
   async getHostInfo(hostAlias) {
@@ -331,49 +337,41 @@ class SSHClient {
 
   async checkConnectivity(hostAlias) {
     try {
-      // Simple connectivity test using ssh
       const result = await this.runRemoteCommand(hostAlias, 'echo connected');
       const connected = result.code === 0 && result.stdout.trim() === 'connected';
-
+      if (connected) return { connected, message: 'Connection successful' };
       return {
         connected,
-        message: connected ? 'Connection successful' : 'Connection failed'
+        message: result.error ? result.error.message : 'Connection failed',
+        error: result.error,
+        stderr: result.stderr
       };
     } catch (error) {
-      debugLog(`Connectivity error with ${hostAlias}: ${error.message}`);
-      return {
-        connected: false,
-        message: error instanceof Error ? error.message : String(error)
-      };
+      return { connected: false, message: error instanceof Error ? error.message : String(error) };
     }
+  }
+
+  async transfer(args) {
+    const result = await this.exec('scp', args, 60000);
+    if (result.code === 0) return { success: true };
+    return { success: false, error: result.error, stderr: result.stderr };
   }
 
   async uploadFile(hostAlias, localPath, remotePath) {
-    try {
-      debugLog(`Executing: scp ${localPath} ${hostAlias}:${remotePath}`);
-
-      await execFileAsync('scp', [localPath, `${hostAlias}:${remotePath}`], {
-        timeout: 60000 // 60 second timeout for file transfer
-      });
-      return true;
-    } catch (error) {
-      debugLog(`Error uploading file to ${hostAlias}: ${error.message}`);
-      return false;
-    }
+    assertSafeTarget(hostAlias);
+    debugLog(`Executing: scp ${localPath} ${hostAlias}:${remotePath}`);
+    return await this.transfer(['--', localPath, `${hostAlias}:${remotePath}`]);
   }
 
   async downloadFile(hostAlias, remotePath, localPath) {
-    try {
-      debugLog(`Executing: scp ${hostAlias}:${remotePath} ${localPath}`);
+    assertSafeTarget(hostAlias);
+    debugLog(`Executing: scp ${hostAlias}:${remotePath} ${localPath}`);
+    return await this.transfer(['--', `${hostAlias}:${remotePath}`, localPath]);
+  }
 
-      await execFileAsync('scp', [`${hostAlias}:${remotePath}`, localPath], {
-        timeout: 60000 // 60 second timeout for file transfer
-      });
-      return true;
-    } catch (error) {
-      debugLog(`Error downloading file from ${hostAlias}: ${error.message}`);
-      return false;
-    }
+  async replaceHostKey(hostAlias, fingerprint) {
+    assertSafeTarget(hostAlias);
+    return await replaceHostKey(hostAlias, fingerprint);
   }
 
   async runCommandBatch(hostAlias, commands) {
@@ -432,7 +430,7 @@ function createMCPServer(sshClient) {
         },
         {
           name: "runRemoteCommand",
-          description: "Executes a shell command on an SSH host",
+          description: "Executes a shell command on an SSH host. Never prompts: a host seen for the first time is trusted and recorded; a host whose key CHANGED is refused with error.kind 'host_key_changed' and the fingerprint it presented (see replaceHostKey). error.kind explains any other ssh failure (auth_failed, no_route, vault_denied, timeout).",
           inputSchema: {
             type: "object",
             properties: {
@@ -521,6 +519,24 @@ function createMCPServer(sshClient) {
           },
         },
         {
+          name: "replaceHostKey",
+          description: "Replaces the recorded SSH host key of a host after an error.kind 'host_key_changed'. Use ONLY after telling the user the presented fingerprint and getting their explicit confirmation that the change is expected (for example the host was reinstalled). The fingerprint argument must be the one the host presents; if it does not match, nothing changes and the current fingerprints are returned.",
+          inputSchema: {
+            type: "object",
+            properties: {
+              hostAlias: {
+                type: "string",
+                description: "Alias or hostname of the SSH host",
+              },
+              fingerprint: {
+                type: "string",
+                description: "The SHA256:... fingerprint the user confirmed",
+              },
+            },
+            required: ["hostAlias", "fingerprint"],
+          },
+        },
+        {
           name: "runCommandBatch",
           description: "Executes multiple shell commands sequentially on an SSH host",
           inputSchema: {
@@ -586,24 +602,31 @@ function createMCPServer(sshClient) {
         }
 
         case "uploadFile": {
-          const success = await sshClient.uploadFile(
+          const result = await sshClient.uploadFile(
             args.hostAlias,
             args.localPath,
             args.remotePath
           );
           return {
-            content: [{ type: "text", text: JSON.stringify({ success }, null, 2) }],
+            content: [{ type: "text", text: JSON.stringify(result, null, 2) }],
           };
         }
 
         case "downloadFile": {
-          const success = await sshClient.downloadFile(
+          const result = await sshClient.downloadFile(
             args.hostAlias,
             args.remotePath,
             args.localPath
           );
           return {
-            content: [{ type: "text", text: JSON.stringify({ success }, null, 2) }],
+            content: [{ type: "text", text: JSON.stringify(result, null, 2) }],
+          };
+        }
+
+        case "replaceHostKey": {
+          const result = await sshClient.replaceHostKey(args.hostAlias, args.fingerprint);
+          return {
+            content: [{ type: "text", text: JSON.stringify(result, null, 2) }],
           };
         }
 
