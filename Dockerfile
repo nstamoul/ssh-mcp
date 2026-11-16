@@ -18,8 +18,9 @@ RUN npm ci --production --ignore-scripts
 # Stage 2: Production
 FROM node:20-alpine
 
-# Install openssh-client for SSH operations
-RUN apk add --no-cache openssh-client
+# openssh-client for SSH operations; python3 for the ShellHub 443 route of
+# homelab-connect (tls-pipe.py)
+RUN apk add --no-cache openssh-client python3
 
 WORKDIR /app
 
@@ -34,7 +35,7 @@ RUN addgroup -g 1001 -S mcp && \
 COPY --from=deps /app/node_modules ./node_modules
 
 # Copy application files
-COPY --chown=mcp:mcp server-http.mjs ssh-exec.mjs ./
+COPY --chown=mcp:mcp server-http.mjs ssh-exec.mjs realm.mjs ./
 COPY --chown=mcp:mcp package.json ./
 
 # Switch to non-root user

@@ -14,6 +14,7 @@ import { readFile } from 'fs/promises';
 import { join } from 'path';
 import { createRequire } from 'module';
 import { assertSafeTarget, classifySshFailure, ensureKnownHosts, replaceHostKey, sshOptions } from './ssh-exec.mjs';
+import { RealmCredentials, findRealmHost, loadRealms, realmSshOptions } from './realm.mjs';
 
 // Use createRequire to work around ESM import issues
 const require = createRequire(import.meta.url);
@@ -294,10 +295,74 @@ class SSHConfigParser {
 class SSHClient {
   constructor() {
     this.configParser = new SSHConfigParser();
+    this.realms = loadRealms();
+    this.credentials = new Map(this.realms.map((realm) => [realm.name, new RealmCredentials(realm)]));
+    debugLog(`Realms: ${this.realms.map((r) => `${r.name} (${r.hosts.length} hosts)`).join(', ') || 'none'}`);
+  }
+
+  realmHostList() {
+    return this.realms.flatMap((realm) => realm.hosts.map((host) => ({
+      alias: host.alias,
+      hostname: host.hostname,
+      user: host.user,
+      port: host.port,
+      realm: realm.name,
+      auth: `certificate from ${realm.vault} (principal ${realm.principal})`,
+      source: 'realm',
+    })));
   }
 
   async listKnownHosts() {
-    return await this.configParser.getAllKnownHosts();
+    const realmHosts = this.realmHostList();
+    const taken = new Set(realmHosts.flatMap((h) => [h.alias, h.hostname]));
+    const others = await this.configParser.getAllKnownHosts();
+    return [...realmHosts, ...others.filter((h) => !taken.has(h.alias) && !taken.has(h.hostname))];
+  }
+
+  // How to reach a host: realm hosts get the MCP's own key and a Vault
+  // certificate; everything else goes through the mounted ~/.ssh config.
+  // If Vault cannot issue a certificate the mounted config is tried instead,
+  // and `realm.error` says why.
+  async connection(hostAlias) {
+    assertSafeTarget(hostAlias);
+    const match = findRealmHost(this.realms, hostAlias);
+    if (!match) return { opts: [], target: hostAlias };
+    try {
+      const credentials = await this.credentials.get(match.realm.name).ensureCertificate();
+      return {
+        opts: realmSshOptions(match.host, credentials),
+        target: match.host.hostname,
+        realm: { name: match.realm.name, auth: 'certificate', validUntil: new Date(credentials.validUntil).toISOString() },
+      };
+    } catch (error) {
+      debugLog(`Realm ${match.realm.name}: ${error.message}`);
+      return {
+        opts: [],
+        target: hostAlias,
+        realm: {
+          name: match.realm.name,
+          auth: 'mounted-config',
+          error: { kind: error.kind || 'vault_unavailable', message: error.message },
+        },
+      };
+    }
+  }
+
+  async accessStatus(renew) {
+    const out = [];
+    for (const credentials of this.credentials.values()) {
+      let renewal;
+      if (renew) {
+        try {
+          const result = await credentials.ensureCertificate({ force: true });
+          renewal = { ok: true, validUntil: new Date(result.validUntil).toISOString() };
+        } catch (error) {
+          renewal = { ok: false, kind: error.kind, message: error.message };
+        }
+      }
+      out.push({ ...(await credentials.status()), ...(renewal ? { renewal } : {}) });
+    }
+    return { realms: out };
   }
 
   // Runs ssh or scp without ever prompting. A failure of ssh itself (as
@@ -325,12 +390,16 @@ class SSHClient {
   }
 
   async runRemoteCommand(hostAlias, command) {
-    assertSafeTarget(hostAlias);
-    debugLog(`Executing: ssh ${hostAlias} ${command}`);
-    return await this.exec('ssh', ['--', hostAlias, command], 30000);
+    const route = await this.connection(hostAlias);
+    debugLog(`Executing: ssh ${route.target} ${command}`);
+    const result = await this.exec('ssh', [...route.opts, '--', route.target, command], 30000);
+    if (route.realm) result.realm = route.realm;
+    return result;
   }
 
   async getHostInfo(hostAlias) {
+    const realmHost = this.realmHostList().find((h) => h.alias === hostAlias || h.hostname === hostAlias);
+    if (realmHost) return realmHost;
     const hosts = await this.configParser.processIncludeDirectives(this.configParser.configPath);
     return hosts.find(host => host.alias === hostAlias || host.hostname === hostAlias) || null;
   }
@@ -339,39 +408,48 @@ class SSHClient {
     try {
       const result = await this.runRemoteCommand(hostAlias, 'echo connected');
       const connected = result.code === 0 && result.stdout.trim() === 'connected';
-      if (connected) return { connected, message: 'Connection successful' };
+      const realm = result.realm ? { realm: result.realm } : {};
+      if (connected) return { connected, message: 'Connection successful', ...realm };
       return {
         connected,
         message: result.error ? result.error.message : 'Connection failed',
         error: result.error,
-        stderr: result.stderr
+        stderr: result.stderr,
+        ...realm
       };
     } catch (error) {
       return { connected: false, message: error instanceof Error ? error.message : String(error) };
     }
   }
 
-  async transfer(args) {
-    const result = await this.exec('scp', args, 60000);
-    if (result.code === 0) return { success: true };
-    return { success: false, error: result.error, stderr: result.stderr };
+  async transfer(route, args) {
+    const result = await this.exec('scp', [...route.opts, ...args], 60000);
+    const realm = route.realm ? { realm: route.realm } : {};
+    if (result.code === 0) return { success: true, ...realm };
+    return { success: false, error: result.error, stderr: result.stderr, ...realm };
   }
 
   async uploadFile(hostAlias, localPath, remotePath) {
-    assertSafeTarget(hostAlias);
-    debugLog(`Executing: scp ${localPath} ${hostAlias}:${remotePath}`);
-    return await this.transfer(['--', localPath, `${hostAlias}:${remotePath}`]);
+    const route = await this.connection(hostAlias);
+    debugLog(`Executing: scp ${localPath} ${route.target}:${remotePath}`);
+    return await this.transfer(route, ['--', localPath, `${route.target}:${remotePath}`]);
   }
 
   async downloadFile(hostAlias, remotePath, localPath) {
-    assertSafeTarget(hostAlias);
-    debugLog(`Executing: scp ${hostAlias}:${remotePath} ${localPath}`);
-    return await this.transfer(['--', `${hostAlias}:${remotePath}`, localPath]);
+    const route = await this.connection(hostAlias);
+    debugLog(`Executing: scp ${route.target}:${remotePath} ${localPath}`);
+    return await this.transfer(route, ['--', `${route.target}:${remotePath}`, localPath]);
   }
 
   async replaceHostKey(hostAlias, fingerprint) {
     assertSafeTarget(hostAlias);
-    return await replaceHostKey(hostAlias, fingerprint);
+    const match = findRealmHost(this.realms, hostAlias);
+    if (!match) return await replaceHostKey(hostAlias, fingerprint);
+    // Scan over the realm route; no credentials are needed to read a host key.
+    return await replaceHostKey(hostAlias, fingerprint, {
+      target: match.host.hostname,
+      opts: realmSshOptions(match.host, null),
+    });
   }
 
   async runCommandBatch(hostAlias, commands) {
@@ -430,7 +508,7 @@ function createMCPServer(sshClient) {
         },
         {
           name: "runRemoteCommand",
-          description: "Executes a shell command on an SSH host. Never prompts: a host seen for the first time is trusted and recorded; a host whose key CHANGED is refused with error.kind 'host_key_changed' and the fingerprint it presented (see replaceHostKey). error.kind explains any other ssh failure (auth_failed, no_route, vault_denied, timeout).",
+          description: "Executes a shell command on an SSH host. Never prompts: a host seen for the first time is trusted and recorded; a host whose key CHANGED is refused with error.kind 'host_key_changed' and the fingerprint it presented (see replaceHostKey). error.kind explains any other ssh failure (auth_failed, no_route, timeout, client_setup). Hosts in a realm are reached with the MCP's own Vault-issued certificate; the result's realm field says which credential was used and, if Vault failed, why (vault_denied, vault_unavailable, vault_setup).",
           inputSchema: {
             type: "object",
             properties: {
@@ -519,6 +597,20 @@ function createMCPServer(sshClient) {
           },
         },
         {
+          name: "accessStatus",
+          description: "Shows, per realm (a group of hosts reached with a Vault-issued SSH certificate), whether Vault credentials are configured and until when the MCP's certificate is valid. With renew=true it asks Vault for a fresh certificate now and reports why that failed, if it did. Use it when a realm host fails with a vault_* error kind.",
+          inputSchema: {
+            type: "object",
+            properties: {
+              renew: {
+                type: "boolean",
+                description: "Request a new certificate from Vault now",
+              },
+            },
+            required: [],
+          },
+        },
+        {
           name: "replaceHostKey",
           description: "Replaces the recorded SSH host key of a host after an error.kind 'host_key_changed'. Use ONLY after telling the user the presented fingerprint and getting their explicit confirmation that the change is expected (for example the host was reinstalled). The fingerprint argument must be the one the host presents; if it does not match, nothing changes and the current fingerprints are returned.",
           inputSchema: {
@@ -564,7 +656,7 @@ function createMCPServer(sshClient) {
     const { name, arguments: args } = request.params;
     debugLog(`Received callTool request for tool: ${name}`);
 
-    if (!args && name !== "listKnownHosts") {
+    if (!args && name !== "listKnownHosts" && name !== "accessStatus") {
       throw new Error(`No arguments provided for tool: ${name}`);
     }
 
@@ -618,6 +710,13 @@ function createMCPServer(sshClient) {
             args.remotePath,
             args.localPath
           );
+          return {
+            content: [{ type: "text", text: JSON.stringify(result, null, 2) }],
+          };
+        }
+
+        case "accessStatus": {
+          const result = await sshClient.accessStatus(Boolean(args?.renew));
           return {
             content: [{ type: "text", text: JSON.stringify(result, null, 2) }],
           };

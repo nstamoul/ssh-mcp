@@ -68,6 +68,8 @@ test('classifies the common connection failures', () => {
   assert.equal(kind('homelab-connect: no route to 10.64.1.1:22 (direct, tailnet, 443 and 2222 all failed)'), 'no_route');
   assert.equal(kind('vault-ssh: Vault request rejected (HTTP 403); run login'), 'vault_denied');
   assert.equal(kind('Host key verification failed.'), 'host_key_unknown');
+  assert.equal(kind('ssh: connect to host 192.168.1.72 port 22: Host is unreachable'), 'no_route');
+  assert.equal(kind('Cannot execute command-line and remote command.'), 'client_setup');
   assert.equal(kind("env: can't execute 'python3': No such file or directory\nbanner exchange: Connection to UNKNOWN port 65535: Broken pipe"), 'client_setup');
   assert.equal(kind('', { killed: true, signal: 'SIGTERM' }), 'timeout');
   assert.equal(kind('something odd'), 'ssh_error');

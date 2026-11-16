@@ -68,10 +68,10 @@ export function classifySshFailure(error, stderr = '') {
   }
   const table = [
     [/vault-ssh:/, 'vault_denied', 'Vault did not issue an SSH certificate for this host.'],
-    [/can't execute|exec: .*not found|Bad configuration option/, 'client_setup', "This host's ssh config needs a helper the MCP does not have."],
+    [/can't execute|exec: .*not found|Bad configuration option|Cannot execute command-line and remote command/, 'client_setup', "This host's ssh config cannot be used by the MCP as it is."],
     [/Permission denied|Too many authentication failures/, 'auth_failed', 'The host refused the credentials.'],
     [/Host key verification failed/, 'host_key_unknown', 'The host key could not be verified.'],
-    [/Connection timed out|Connection refused|No route to host|Could not resolve hostname|Network is unreachable|homelab-connect: no route|banner exchange|Connection closed by/, 'no_route', 'The host could not be reached.'],
+    [/Connection timed out|Connection refused|No route to host|Host is unreachable|Operation timed out|Could not resolve hostname|Name does not resolve|Temporary failure in name resolution|Network is unreachable|homelab-connect: no route|banner exchange|Connection closed by/, 'no_route', 'The host could not be reached.'],
   ];
   for (const [pattern, kind, message] of table) {
     if (pattern.test(stderr)) return { kind, message };
@@ -114,7 +114,7 @@ export async function knownFingerprints(name, knownHosts = KNOWN_HOSTS) {
  * (config, ProxyCommand, HostKeyAlias), without authenticating and without
  * touching the real known_hosts. Returns known_hosts-format text.
  */
-export async function scanHostKey(hostAlias) {
+export async function scanHostKey(hostAlias, extraOpts = []) {
   assertSafeTarget(hostAlias);
   const dir = mkdtempSync(join(tmpdir(), 'sshmcp-scan-'));
   const file = join(dir, 'known_hosts');
@@ -129,6 +129,7 @@ export async function scanHostKey(hostAlias) {
       '-o', 'UpdateHostKeys=no',
       '-o', 'PreferredAuthentications=none',
       '-o', `ConnectTimeout=${CONNECT_TIMEOUT}`,
+      ...extraOpts,
       '--', hostAlias, 'true',
     ], { timeout: 45000 });
   } catch (error) {
@@ -193,9 +194,9 @@ export async function replaceHostKeyInFile(knownHosts, scanned, confirmedFingerp
   return { replaced: true, presented: view, previous: known };
 }
 
-export async function replaceHostKey(hostAlias, confirmedFingerprint, knownHosts = KNOWN_HOSTS) {
+export async function replaceHostKey(hostAlias, confirmedFingerprint, { knownHosts = KNOWN_HOSTS, target = hostAlias, opts = [] } = {}) {
   ensureKnownHosts(knownHosts);
-  const { scanned, stderr } = await scanHostKey(hostAlias);
+  const { scanned, stderr } = await scanHostKey(target, opts);
   if (!scanned.trim()) {
     return { replaced: false, error: classifySshFailure({ code: 255 }, stderr), stderr };
   }
