@@ -97,6 +97,14 @@ export function loadRealms(file = REALMS_FILE, env = process.env) {
       approleDir: env[`MCP_SSH_${key}_APPROLE_DIR`] || realm.approleDir || `/run/ssh-mcp/${name}`,
       staticKeyPath: realm.staticKeyPath || null,
       adhocPath: realm.adhocPath || null,
+      customers: realm.customers ? {
+        nautobot: realm.customers.nautobot,
+        nautobotTokenPath: realm.customers.nautobotTokenPath,
+        nautobotTokenField: realm.customers.nautobotTokenField || 'token',
+        loginPath: realm.customers.loginPath || 'kv/data/{tenant}/login',
+        jump: realm.customers.jump,
+        skipTenants: realm.customers.skipTenants || [],
+      } : null,
       hosts: Object.entries(realm.hosts || {}).map(([alias, host]) => normalizeHost(alias, host, name)),
     };
   });
@@ -219,6 +227,35 @@ export class RealmCredentials {
     } finally {
       this.vault('auth/token/revoke-self', token, {}).catch(() => {});
     }
+  }
+
+  /** A tenant's device login (username/password) from the realm's Vault. Never cached. */
+  async customerLogin(tenant) {
+    const template = this.realm.customers?.loginPath;
+    if (!template) throw new RealmError('vault_setup', `Realm ${this.realm.name} has no customer login path.`);
+    const path = template.replace('{tenant}', encodeURIComponent(tenant));
+    return this.withToken(async (token) => {
+      const doc = await this.vault(path, token, undefined, { allow404: true });
+      const data = doc?.data?.data;
+      if (!data?.username || !data?.password) {
+        throw new RealmError('vault_setup', `No username/password for tenant ${tenant} at ${path}.`);
+      }
+      return { username: String(data.username), password: String(data.password) };
+    });
+  }
+
+  /** The Nautobot API token, read from Vault once and kept in memory. */
+  async nautobotToken() {
+    if (this.nautobotTokenValue) return this.nautobotTokenValue;
+    const c = this.realm.customers;
+    if (!c?.nautobotTokenPath) throw new RealmError('vault_setup', `Realm ${this.realm.name} has no Nautobot token path.`);
+    const value = await this.withToken(async (token) => {
+      const doc = await this.vault(c.nautobotTokenPath, token);
+      return doc?.data?.data?.[c.nautobotTokenField];
+    });
+    if (!value) throw new RealmError('vault_setup', `No ${c.nautobotTokenField} at ${c.nautobotTokenPath}.`);
+    this.nautobotTokenValue = String(value);
+    return this.nautobotTokenValue;
   }
 
   /** The realm's static MCP key, fetched from Vault once per container start. */

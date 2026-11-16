@@ -35,7 +35,8 @@ RUN addgroup -g 1001 -S mcp && \
 COPY --from=deps /app/node_modules ./node_modules
 
 # Copy application files
-COPY --chown=mcp:mcp server-http.mjs ssh-exec.mjs realm.mjs ./
+COPY --chown=mcp:mcp server-http.mjs ssh-exec.mjs realm.mjs customers.mjs ./
+COPY --chmod=0755 askpass.sh /app/askpass.sh
 COPY --chown=mcp:mcp package.json ./
 
 # Switch to non-root user

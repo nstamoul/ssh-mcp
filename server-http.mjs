@@ -14,8 +14,9 @@ import { readFile } from 'fs/promises';
 import { existsSync } from 'fs';
 import { join } from 'path';
 import { createRequire } from 'module';
-import { assertSafeTarget, classifySshFailure, ensureKnownHosts, replaceHostKey, sshOptions } from './ssh-exec.mjs';
-import { RealmCredentials, findRealmHost, loadRealms, normalizeHost, realmSshOptions } from './realm.mjs';
+import { KNOWN_HOSTS, assertSafeTarget, classifySshFailure, ensureKnownHosts, replaceHostKey, sshOptions } from './ssh-exec.mjs';
+import { NautobotClient, SlotDirectory, askpassEnv, customerSshOptions, pickSlot, proxyCommand, runDiscover } from './customers.mjs';
+import { RealmCredentials, RealmError, findRealmHost, loadRealms, normalizeHost, realmSshOptions } from './realm.mjs';
 
 // Use createRequire to work around ESM import issues
 const require = createRequire(import.meta.url);
@@ -300,6 +301,19 @@ class SSHClient {
     this.credentials = new Map(this.realms.map((realm) => [realm.name, new RealmCredentials(realm)]));
     // A mounted ~/.ssh/config (OrbStack, transitional) serves hosts outside the realms.
     this.legacyConfig = existsSync(this.configParser.configPath);
+    // Realms with `customers`: Nautobot lookup and VPN slots on the jump host.
+    this.nautobot = new Map();
+    this.slotDirs = new Map();
+    for (const realm of this.realms.filter((r) => r.customers)) {
+      const credentials = this.credentials.get(realm.name);
+      this.nautobot.set(realm.name, new NautobotClient({ url: realm.customers.nautobot, token: () => credentials.nautobotToken() }));
+      this.slotDirs.set(realm.name, new SlotDirectory({
+        discover: async () => {
+          const jump = await this.jumpRoute(realm);
+          return runDiscover(jump.args, jump.target);
+        },
+      }));
+    }
     debugLog(`Realms: ${this.realms.map((r) => `${r.name} (${r.hosts.length} hosts)`).join(', ') || 'none'}`);
   }
 
@@ -353,6 +367,88 @@ class SSHClient {
     return null;
   }
 
+  // ssh options to the jump host of a customers realm (a certificate host of that realm).
+  async jumpRoute(realm) {
+    const host = realm.hosts.find((h) => h.alias === realm.customers.jump);
+    if (!host) throw new RealmError('client_setup', `Jump host ${realm.customers.jump} is not a host of realm ${realm.name}.`);
+    const issued = await this.credentials.get(realm.name).ensureCertificate();
+    return {
+      args: [
+        ...realmSshOptions(host, issued, null),
+        '-o', 'BatchMode=yes',
+        '-o', 'StrictHostKeyChecking=yes',
+        '-o', `UserKnownHostsFile=${KNOWN_HOSTS}`,
+        '-o', 'ConnectTimeout=20',
+      ],
+      target: host.hostname,
+    };
+  }
+
+  // A host found in Nautobot for a realm with `customers`, or null.
+  // Returns { realm, device } or { lookupError }.
+  async lookupCustomer(target) {
+    let lookupError = null;
+    for (const realm of this.realms.filter((r) => r.customers)) {
+      try {
+        const device = await this.nautobot.get(realm.name).lookup(target);
+        if (!device) continue;
+        if (device.tenant && realm.customers.skipTenants.includes(device.tenant)) continue;
+        return { realm, device };
+      } catch (error) {
+        debugLog(`Nautobot lookup in ${realm.name} failed: ${error.message}`);
+        lookupError = error;
+      }
+    }
+    return lookupError ? { lookupError } : null;
+  }
+
+  // Route to a customer device: VPN slot, tenant login, ProxyCommand through the jump host.
+  async customerRoute({ realm, device }, { forScan = false } = {}) {
+    const info = {
+      name: realm.name,
+      auth: 'password',
+      source: 'nautobot',
+      tenant: device.tenant,
+      device: device.name,
+      platform: device.platform,
+    };
+    try {
+      if (!device.hostname) {
+        return { failure: { kind: 'unknown_host', message: `${device.name} is in Nautobot without a primary IPv4 address.` }, realm: info };
+      }
+      if (!device.tenant) {
+        return { failure: { kind: 'vault_setup', message: `${device.name} has no tenant in Nautobot, so there is no login to use.` }, realm: info };
+      }
+      const directory = this.slotDirs.get(realm.name);
+      let slot = pickSlot(await directory.slots(), device.hostname);
+      if (!slot) slot = pickSlot(await directory.slots({ fresh: true }), device.hostname);
+      if (!slot) {
+        return {
+          failure: {
+            kind: 'no_vpn',
+            message: `No open VPN slot routes ${device.hostname} (${device.name}, tenant ${device.tenant}).`,
+            hint: "Open the tenant's VPN in Nautobot's VPN manager, then try again.",
+          },
+          realm: info,
+        };
+      }
+      info.vpn = slot.slug;
+      const jump = await this.jumpRoute(realm);
+      const proxy = proxyCommand(jump.args, jump.target, slot.worker, device.hostname, 22);
+      if (forScan) return { opts: customerSshOptions({ username: 'hostkey-scan' }, 22, proxy), target: device.hostname, realm: info };
+      const login = await this.credentials.get(realm.name).customerLogin(device.tenant);
+      return {
+        opts: customerSshOptions(login, 22, proxy),
+        target: device.hostname,
+        env: askpassEnv(login.password),
+        batch: false,
+        realm: info,
+      };
+    } catch (error) {
+      return { failure: { kind: error.kind || 'vault_unavailable', message: error.message }, realm: info };
+    }
+  }
+
   // How to reach a host. Hosts from the realms file or the ad-hoc list use
   // the MCP's own credentials: a Vault certificate (auth "certificate") or
   // the realm's static key (auth "key"). Anything else goes through a
@@ -363,12 +459,16 @@ class SSHClient {
     assertSafeTarget(hostAlias);
     const match = await this.findHost(hostAlias);
     if (!match) {
+      const customer = await this.lookupCustomer(hostAlias);
+      if (customer?.device) return this.customerRoute(customer);
       if (this.legacyConfig) return { opts: [], target: hostAlias };
       return {
         failure: {
           kind: 'unknown_host',
-          message: `${hostAlias} is not in the MCP's host list.`,
-          hint: 'Check listKnownHosts. To use a new host now, add it with addHost.',
+          message: `${hostAlias} is not in the MCP's host list${customer?.lookupError ? '' : ' or in Nautobot'}.`,
+          hint: customer?.lookupError
+            ? `Nautobot could not be asked (${customer.lookupError.message}). Check listKnownHosts, or add it with addHost.`
+            : 'Check listKnownHosts. To use a new host now, add it with addHost.',
         },
       };
     }
@@ -488,6 +588,14 @@ class SSHClient {
           status.adhocHosts = { error: error.kind, message: error.message };
         }
       }
+      if (credentials.realm.customers) {
+        try {
+          const slots = await this.slotDirs.get(credentials.realm.name).slots({ fresh: Boolean(renew) });
+          status.customers = { nautobot: credentials.realm.customers.nautobot, vpnSlots: slots.map((s) => `${s.slug}${s.up ? '' : ' (worker down)'}`) };
+        } catch (error) {
+          status.customers = { nautobot: credentials.realm.customers.nautobot, error: { kind: error.kind, message: error.message } };
+        }
+      }
       out.push({ ...status, ...(renewal ? { renewal } : {}) });
     }
     return { realms: out, mountedConfig: this.legacyConfig };
@@ -495,12 +603,16 @@ class SSHClient {
 
   // Runs ssh or scp without ever prompting. A failure of ssh itself (as
   // opposed to a non-zero remote exit) comes back as `error` with a `kind`.
-  async exec(binary, args, timeout) {
+  async exec(binary, args, timeout, { env, batch = true } = {}) {
     ensureKnownHosts();
+    // Password logins need BatchMode off so ssh uses SSH_ASKPASS; the first
+    // value of an option wins, so it goes before the defaults.
+    const first = batch ? [] : ['-o', 'BatchMode=no'];
     try {
-      const { stdout, stderr } = await execFileAsync(binary, [...sshOptions(), ...args], {
+      const { stdout, stderr } = await execFileAsync(binary, [...first, ...sshOptions(), ...args], {
         timeout,
-        maxBuffer: 1024 * 1024 * 10 // 10MB buffer
+        maxBuffer: 1024 * 1024 * 10, // 10MB buffer
+        ...(env ? { env: { ...process.env, ...env } } : {}),
       });
       return { stdout: stdout || '', stderr: stderr || '', code: 0 };
     } catch (error) {
@@ -521,7 +633,7 @@ class SSHClient {
     const route = await this.connection(hostAlias);
     if (route.failure) return this.failed(route);
     debugLog(`Executing: ssh ${route.target} ${command}`);
-    const result = await this.exec('ssh', [...route.opts, '--', route.target, command], 30000);
+    const result = await this.exec('ssh', [...route.opts, '--', route.target, command], 30000, route);
     if (route.realm) result.realm = route.realm;
     return result;
   }
@@ -529,6 +641,17 @@ class SSHClient {
   async getHostInfo(hostAlias) {
     const realmHost = (await this.realmHostList()).find((h) => h.alias === hostAlias || h.hostname === hostAlias);
     if (realmHost) return realmHost;
+    const customer = await this.lookupCustomer(hostAlias);
+    if (customer?.device) {
+      const { device, realm } = customer;
+      let vpn = null;
+      try {
+        vpn = pickSlot(await this.slotDirs.get(realm.name).slots(), device.hostname)?.slug || null;
+      } catch (error) {
+        debugLog(`Slot lookup failed: ${error.message}`);
+      }
+      return { alias: device.name, hostname: device.hostname, tenant: device.tenant, platform: device.platform, realm: realm.name, auth: 'password', source: 'nautobot', vpn: vpn || 'none open' };
+    }
     if (!this.legacyConfig) return null;
     const hosts = await this.configParser.processIncludeDirectives(this.configParser.configPath);
     return hosts.find(host => host.alias === hostAlias || host.hostname === hostAlias) || null;
@@ -557,7 +680,7 @@ class SSHClient {
       const { stdout, ...failed } = this.failed(route);
       return { success: false, ...failed };
     }
-    const result = await this.exec('scp', [...route.opts, ...args], 60000);
+    const result = await this.exec('scp', [...route.opts, ...args], 60000, route);
     const realm = route.realm ? { realm: route.realm } : {};
     if (result.code === 0) return { success: true, ...realm };
     return { success: false, error: result.error, stderr: result.stderr, ...realm };
@@ -577,6 +700,12 @@ class SSHClient {
     assertSafeTarget(hostAlias);
     const match = await this.findHost(hostAlias);
     if (!match) {
+      const customer = await this.lookupCustomer(hostAlias);
+      if (customer?.device) {
+        const route = await this.customerRoute(customer, { forScan: true });
+        if (route.failure) return { replaced: false, error: route.failure };
+        return await replaceHostKey(hostAlias, fingerprint, { target: route.target, opts: route.opts });
+      }
       if (this.legacyConfig) return await replaceHostKey(hostAlias, fingerprint);
       return { replaced: false, error: { kind: 'unknown_host', message: `${hostAlias} is not in the MCP's host list.` } };
     }
@@ -634,7 +763,7 @@ function createMCPServer(sshClient) {
       tools: [
         {
           name: "listKnownHosts",
-          description: "Lists the hosts this MCP can reach: curated hosts from the realms file, hosts added with addHost (source 'adhoc'), and, on instances that still mount a ~/.ssh config, the hosts from that config.",
+          description: "Lists the hosts this MCP can reach: curated hosts from the realms file, hosts added with addHost (source 'adhoc'), and, on instances that still mount a ~/.ssh config, the hosts from that config. Customer devices are not listed: any device or VM name or IP that is in Nautobot can be used directly as hostAlias (it is reached through the tenant's open VPN slot with the tenant's login).",
           inputSchema: {
             type: "object",
             properties: {},
@@ -643,7 +772,7 @@ function createMCPServer(sshClient) {
         },
         {
           name: "runRemoteCommand",
-          description: "Executes a shell command on an SSH host. Never prompts: a host seen for the first time is trusted and recorded; a host whose key CHANGED is refused with error.kind 'host_key_changed' and the fingerprint it presented (see replaceHostKey). error.kind explains any other ssh failure (auth_failed, no_route, timeout, client_setup). Hosts in a realm are reached with the MCP's own Vault-issued certificate; the result's realm field says which credential was used and, if Vault failed, why (vault_denied, vault_unavailable, vault_setup).",
+          description: "Executes a shell command on an SSH host. Never prompts: a host seen for the first time is trusted and recorded; a host whose key CHANGED is refused with error.kind 'host_key_changed' and the fingerprint it presented (see replaceHostKey). error.kind explains any other ssh failure (auth_failed, no_route, timeout, client_setup). Hosts in a realm are reached with the MCP's own Vault-issued certificate; the result's realm field says which credential was used and, if Vault failed, why (vault_denied, vault_unavailable, vault_setup). A customer device can be named by its Nautobot name or IP: it is reached through the tenant's open VPN slot with the tenant's login (error.kind no_vpn when that VPN is not open).",
           inputSchema: {
             type: "object",
             properties: {
