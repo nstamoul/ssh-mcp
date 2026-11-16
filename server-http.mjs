@@ -11,10 +11,11 @@ import express from 'express';
 import cors from 'cors';
 import { homedir } from 'os';
 import { readFile } from 'fs/promises';
+import { existsSync } from 'fs';
 import { join } from 'path';
 import { createRequire } from 'module';
 import { assertSafeTarget, classifySshFailure, ensureKnownHosts, replaceHostKey, sshOptions } from './ssh-exec.mjs';
-import { RealmCredentials, findRealmHost, loadRealms, realmSshOptions } from './realm.mjs';
+import { RealmCredentials, findRealmHost, loadRealms, normalizeHost, realmSshOptions } from './realm.mjs';
 
 // Use createRequire to work around ESM import issues
 const require = createRequire(import.meta.url);
@@ -297,55 +298,174 @@ class SSHClient {
     this.configParser = new SSHConfigParser();
     this.realms = loadRealms();
     this.credentials = new Map(this.realms.map((realm) => [realm.name, new RealmCredentials(realm)]));
+    // A mounted ~/.ssh/config (OrbStack, transitional) serves hosts outside the realms.
+    this.legacyConfig = existsSync(this.configParser.configPath);
     debugLog(`Realms: ${this.realms.map((r) => `${r.name} (${r.hosts.length} hosts)`).join(', ') || 'none'}`);
   }
 
-  realmHostList() {
-    return this.realms.flatMap((realm) => realm.hosts.map((host) => ({
-      alias: host.alias,
-      hostname: host.hostname,
-      user: host.user,
-      port: host.port,
-      realm: realm.name,
-      auth: `certificate from ${realm.vault} (principal ${realm.principal})`,
-      source: 'realm',
-    })));
+  // Curated hosts (realms file) and ad-hoc hosts (shared through Vault).
+  async realmHostList() {
+    const out = [];
+    for (const realm of this.realms) {
+      const describe = (host, source) => ({
+        alias: host.alias,
+        hostname: host.hostname,
+        user: host.user,
+        port: host.port,
+        realm: realm.name,
+        auth: host.auth,
+        source,
+        ...(host.note ? { note: host.note } : {}),
+      });
+      out.push(...realm.hosts.map((h) => describe(h, 'curated')));
+      if (!realm.adhocPath) continue;
+      try {
+        const adhoc = await this.credentials.get(realm.name).adhocHosts();
+        out.push(...adhoc.map((h) => describe(h, 'adhoc')));
+      } catch (error) {
+        debugLog(`Ad-hoc hosts of ${realm.name} unavailable: ${error.message}`);
+      }
+    }
+    return out;
   }
 
   async listKnownHosts() {
-    const realmHosts = this.realmHostList();
+    const realmHosts = await this.realmHostList();
+    if (!this.legacyConfig) return realmHosts;
     const taken = new Set(realmHosts.flatMap((h) => [h.alias, h.hostname]));
     const others = await this.configParser.getAllKnownHosts();
     return [...realmHosts, ...others.filter((h) => !taken.has(h.alias) && !taken.has(h.hostname))];
   }
 
-  // How to reach a host: realm hosts get the MCP's own key and a Vault
-  // certificate; everything else goes through the mounted ~/.ssh config.
-  // If Vault cannot issue a certificate the mounted config is tried instead,
-  // and `realm.error` says why.
+  async findHost(hostAlias) {
+    const curated = findRealmHost(this.realms, hostAlias);
+    if (curated) return { ...curated, source: 'curated' };
+    for (const realm of this.realms) {
+      if (!realm.adhocPath) continue;
+      try {
+        const hosts = await this.credentials.get(realm.name).adhocHosts();
+        const host = hosts.find((h) => h.alias === hostAlias || h.hostname === hostAlias);
+        if (host) return { realm, host, source: 'adhoc' };
+      } catch (error) {
+        debugLog(`Ad-hoc lookup in ${realm.name} failed: ${error.message}`);
+      }
+    }
+    return null;
+  }
+
+  // How to reach a host. Hosts from the realms file or the ad-hoc list use
+  // the MCP's own credentials: a Vault certificate (auth "certificate") or
+  // the realm's static key (auth "key"). Anything else goes through a
+  // mounted ~/.ssh config if this instance has one, and is refused if not.
+  // When Vault fails for a curated host and a mounted config exists, that is
+  // tried instead, and realm.error says why.
   async connection(hostAlias) {
     assertSafeTarget(hostAlias);
-    const match = findRealmHost(this.realms, hostAlias);
-    if (!match) return { opts: [], target: hostAlias };
-    try {
-      const credentials = await this.credentials.get(match.realm.name).ensureCertificate();
+    const match = await this.findHost(hostAlias);
+    if (!match) {
+      if (this.legacyConfig) return { opts: [], target: hostAlias };
       return {
-        opts: realmSshOptions(match.host, credentials),
-        target: match.host.hostname,
-        realm: { name: match.realm.name, auth: 'certificate', validUntil: new Date(credentials.validUntil).toISOString() },
-      };
-    } catch (error) {
-      debugLog(`Realm ${match.realm.name}: ${error.message}`);
-      return {
-        opts: [],
-        target: hostAlias,
-        realm: {
-          name: match.realm.name,
-          auth: 'mounted-config',
-          error: { kind: error.kind || 'vault_unavailable', message: error.message },
+        failure: {
+          kind: 'unknown_host',
+          message: `${hostAlias} is not in the MCP's host list.`,
+          hint: 'Check listKnownHosts. To use a new host now, add it with addHost.',
         },
       };
     }
+    const credentials = this.credentials.get(match.realm.name);
+    const realm = { name: match.realm.name, auth: match.host.auth, source: match.source };
+    try {
+      if (match.host.auth === 'key') {
+        const { key } = await credentials.ensureStaticKey();
+        return { opts: realmSshOptions(match.host, { key, cert: null }), target: match.host.hostname, realm };
+      }
+      const issued = await credentials.ensureCertificate();
+      return {
+        opts: realmSshOptions(match.host, issued),
+        target: match.host.hostname,
+        realm: { ...realm, validUntil: new Date(issued.validUntil).toISOString() },
+      };
+    } catch (error) {
+      debugLog(`Realm ${match.realm.name}: ${error.message}`);
+      const failure = { kind: error.kind || 'vault_unavailable', message: error.message };
+      if (this.legacyConfig && match.source === 'curated') {
+        return { opts: [], target: hostAlias, realm: { ...realm, auth: 'mounted-config', error: failure } };
+      }
+      return { failure, realm };
+    }
+  }
+
+  failed(route) {
+    return {
+      stdout: '',
+      stderr: route.failure.message,
+      code: 255,
+      error: route.failure,
+      ...(route.realm ? { realm: route.realm } : {}),
+    };
+  }
+
+  adhocRealm(name) {
+    const realms = this.realms.filter((r) => r.adhocPath);
+    const realm = name ? realms.find((r) => r.name === name) : realms[0];
+    if (!realm) throw new Error(name ? `Realm ${name} does not keep ad-hoc hosts.` : 'No realm keeps ad-hoc hosts.');
+    return realm;
+  }
+
+  async addHost(args) {
+    const realm = this.adhocRealm(args.realm);
+    const entry = normalizeHost(args.alias, { ...args, auth: args.auth || 'key' }, realm.name);
+    if (findRealmHost(this.realms, entry.alias)) {
+      throw new Error(`${entry.alias} is a curated host; change it in the realms file instead.`);
+    }
+    const credentials = this.credentials.get(realm.name);
+    const stored = {
+      hostname: entry.hostname,
+      user: entry.user,
+      port: entry.port,
+      auth: entry.auth,
+      ...(entry.note ? { note: entry.note } : {}),
+      addedAt: new Date().toISOString(),
+      addedBy: process.env.MCP_SSH_INSTANCE || 'ssh-mcp',
+    };
+    const replaced = await credentials.updateAdhoc((hosts) => {
+      const existed = Boolean(hosts[entry.alias]);
+      hosts[entry.alias] = stored;
+      return existed;
+    });
+    const out = { added: { alias: entry.alias, ...stored }, realm: realm.name, replaced };
+    if (entry.auth === 'key') {
+      try {
+        out.publicKey = await credentials.publicStaticKey();
+        out.hint = `The host must list this public key in ~${entry.user}/.ssh/authorized_keys. If it trusts the ${realm.name} SSH CA instead, add it again with auth=certificate.`;
+      } catch (error) {
+        out.warning = `Static key unavailable: ${error.message}`;
+      }
+    }
+    return out;
+  }
+
+  async listAdhocHosts() {
+    const out = [];
+    for (const realm of this.realms.filter((r) => r.adhocPath)) {
+      try {
+        const hosts = await this.credentials.get(realm.name).adhocHosts({ fresh: true });
+        out.push({ realm: realm.name, hosts });
+      } catch (error) {
+        out.push({ realm: realm.name, error: { kind: error.kind, message: error.message } });
+      }
+    }
+    return { realms: out };
+  }
+
+  async removeAdhocHost(alias, realmName) {
+    const realm = this.adhocRealm(realmName);
+    const removed = await this.credentials.get(realm.name).updateAdhoc((hosts) => {
+      const existed = Boolean(hosts[alias]);
+      delete hosts[alias];
+      return existed;
+    });
+    return { alias, realm: realm.name, removed };
   }
 
   async accessStatus(renew) {
@@ -360,9 +480,17 @@ class SSHClient {
           renewal = { ok: false, kind: error.kind, message: error.message };
         }
       }
-      out.push({ ...(await credentials.status()), ...(renewal ? { renewal } : {}) });
+      const status = await credentials.status();
+      if (credentials.realm.adhocPath) {
+        try {
+          status.adhocHosts = (await credentials.adhocHosts()).length;
+        } catch (error) {
+          status.adhocHosts = { error: error.kind, message: error.message };
+        }
+      }
+      out.push({ ...status, ...(renewal ? { renewal } : {}) });
     }
-    return { realms: out };
+    return { realms: out, mountedConfig: this.legacyConfig };
   }
 
   // Runs ssh or scp without ever prompting. A failure of ssh itself (as
@@ -391,6 +519,7 @@ class SSHClient {
 
   async runRemoteCommand(hostAlias, command) {
     const route = await this.connection(hostAlias);
+    if (route.failure) return this.failed(route);
     debugLog(`Executing: ssh ${route.target} ${command}`);
     const result = await this.exec('ssh', [...route.opts, '--', route.target, command], 30000);
     if (route.realm) result.realm = route.realm;
@@ -398,8 +527,9 @@ class SSHClient {
   }
 
   async getHostInfo(hostAlias) {
-    const realmHost = this.realmHostList().find((h) => h.alias === hostAlias || h.hostname === hostAlias);
+    const realmHost = (await this.realmHostList()).find((h) => h.alias === hostAlias || h.hostname === hostAlias);
     if (realmHost) return realmHost;
+    if (!this.legacyConfig) return null;
     const hosts = await this.configParser.processIncludeDirectives(this.configParser.configPath);
     return hosts.find(host => host.alias === hostAlias || host.hostname === hostAlias) || null;
   }
@@ -423,6 +553,10 @@ class SSHClient {
   }
 
   async transfer(route, args) {
+    if (route.failure) {
+      const { stdout, ...failed } = this.failed(route);
+      return { success: false, ...failed };
+    }
     const result = await this.exec('scp', [...route.opts, ...args], 60000);
     const realm = route.realm ? { realm: route.realm } : {};
     if (result.code === 0) return { success: true, ...realm };
@@ -431,20 +565,21 @@ class SSHClient {
 
   async uploadFile(hostAlias, localPath, remotePath) {
     const route = await this.connection(hostAlias);
-    debugLog(`Executing: scp ${localPath} ${route.target}:${remotePath}`);
     return await this.transfer(route, ['--', localPath, `${route.target}:${remotePath}`]);
   }
 
   async downloadFile(hostAlias, remotePath, localPath) {
     const route = await this.connection(hostAlias);
-    debugLog(`Executing: scp ${route.target}:${remotePath} ${localPath}`);
     return await this.transfer(route, ['--', `${route.target}:${remotePath}`, localPath]);
   }
 
   async replaceHostKey(hostAlias, fingerprint) {
     assertSafeTarget(hostAlias);
-    const match = findRealmHost(this.realms, hostAlias);
-    if (!match) return await replaceHostKey(hostAlias, fingerprint);
+    const match = await this.findHost(hostAlias);
+    if (!match) {
+      if (this.legacyConfig) return await replaceHostKey(hostAlias, fingerprint);
+      return { replaced: false, error: { kind: 'unknown_host', message: `${hostAlias} is not in the MCP's host list.` } };
+    }
     // Scan over the realm route; no credentials are needed to read a host key.
     return await replaceHostKey(hostAlias, fingerprint, {
       target: match.host.hostname,
@@ -499,7 +634,7 @@ function createMCPServer(sshClient) {
       tools: [
         {
           name: "listKnownHosts",
-          description: "Returns a consolidated list of all known SSH hosts, prioritizing ~/.ssh/config entries first, then additional hosts from ~/.ssh/known_hosts",
+          description: "Lists the hosts this MCP can reach: curated hosts from the realms file, hosts added with addHost (source 'adhoc'), and, on instances that still mount a ~/.ssh config, the hosts from that config.",
           inputSchema: {
             type: "object",
             properties: {},
@@ -597,6 +732,40 @@ function createMCPServer(sshClient) {
           },
         },
         {
+          name: "addHost",
+          description: "Adds a host to the MCP's shared ad-hoc host list (stored in Vault, seen by every MCP instance) so it can be used right away, without editing the curated host file. auth 'key' (default) logs in with the realm's static MCP key: the result returns that public key, which must be in the host's authorized_keys. auth 'certificate' is for hosts that trust the realm's SSH CA. Adding an existing ad-hoc alias replaces it.",
+          inputSchema: {
+            type: "object",
+            properties: {
+              alias: { type: "string", description: "Short name to use as hostAlias" },
+              hostname: { type: "string", description: "IP address or DNS name" },
+              user: { type: "string", description: "Login account" },
+              port: { type: "number", description: "SSH port (default 22)" },
+              auth: { type: "string", enum: ["key", "certificate"], description: "How the MCP logs in (default key)" },
+              realm: { type: "string", description: "Realm to add it to (default: the first realm with an ad-hoc list)" },
+              note: { type: "string", description: "Why it was added" },
+            },
+            required: ["alias", "hostname", "user"],
+          },
+        },
+        {
+          name: "listAdhocHosts",
+          description: "Lists the hosts added with addHost, per realm, with who added them and when, so they can be reviewed and moved into the curated host file or Nautobot.",
+          inputSchema: { type: "object", properties: {}, required: [] },
+        },
+        {
+          name: "removeAdhocHost",
+          description: "Removes a host from the ad-hoc host list.",
+          inputSchema: {
+            type: "object",
+            properties: {
+              alias: { type: "string", description: "Alias given to addHost" },
+              realm: { type: "string", description: "Realm (default: the first realm with an ad-hoc list)" },
+            },
+            required: ["alias"],
+          },
+        },
+        {
           name: "accessStatus",
           description: "Shows, per realm (a group of hosts reached with a Vault-issued SSH certificate), whether Vault credentials are configured and until when the MCP's certificate is valid. With renew=true it asks Vault for a fresh certificate now and reports why that failed, if it did. Use it when a realm host fails with a vault_* error kind.",
           inputSchema: {
@@ -656,7 +825,7 @@ function createMCPServer(sshClient) {
     const { name, arguments: args } = request.params;
     debugLog(`Received callTool request for tool: ${name}`);
 
-    if (!args && name !== "listKnownHosts" && name !== "accessStatus") {
+    if (!args && !["listKnownHosts", "accessStatus", "listAdhocHosts"].includes(name)) {
       throw new Error(`No arguments provided for tool: ${name}`);
     }
 
@@ -713,6 +882,21 @@ function createMCPServer(sshClient) {
           return {
             content: [{ type: "text", text: JSON.stringify(result, null, 2) }],
           };
+        }
+
+        case "addHost": {
+          const result = await sshClient.addHost(args);
+          return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }] };
+        }
+
+        case "listAdhocHosts": {
+          const result = await sshClient.listAdhocHosts();
+          return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }] };
+        }
+
+        case "removeAdhocHost": {
+          const result = await sshClient.removeAdhocHost(args.alias, args.realm);
+          return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }] };
         }
 
         case "accessStatus": {
